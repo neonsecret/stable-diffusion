@@ -1,3 +1,21 @@
+#FORK NOTES
+This fork adds webUi from this guy:
+https://github.com/hlky/stable-diffusion-webui
+
+To neonsecret stable diffusion.
+The aim is to provide stable diffusion webui to the neonsecret version which allows to render high res prompts without rescaling.
+The webui offers all the tools to rescale, img2img and whatever.
+
+NOTE:
+You still need to do all the setup with all the model files
+1.4 model file, GFPGAN pre-trained model,  RealESRGAN_x4plus.pth and RealESRGAN_x4plus_anime_6B.pth to have Upscaling and facefix functions available.
+
+Get them and set them up follwing this guide:
+https://rentry.org/GUItard
+
+
+Enjoy
+
 # Update: v1.0.0 neon GUI edition (for now Windows only)
 
 ## THE GUI IS OUT <br>
