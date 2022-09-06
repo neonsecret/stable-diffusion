@@ -20,7 +20,6 @@ from transformers import logging
 from ldm.util import instantiate_from_config
 from optimUtils import split_weighted_subprompts, logger
 
-# from samplers import CompVisDenoiser
 logging.set_verbosity_error()
 
 
@@ -44,7 +43,7 @@ def get_image(opt, model, modelCS, modelFS, prompt=None):
         start_code = torch.randn([opt.n_samples, opt.C, opt.H // opt.f, opt.W // opt.f], device=opt.device)
 
     batch_size = opt.n_samples
-    if not opt.from_file and prompt is not None:
+    if not opt.from_file and prompt is None:
         prompt = opt.prompt
         assert prompt is not None
         data = [batch_size * [prompt]]
@@ -155,9 +154,6 @@ def get_image(opt, model, modelCS, modelFS, prompt=None):
 
 if __name__ == '__main__':
 
-    config = "optimizedSD/v1-inference.yaml"
-    ckpt = "models/ldm/stable-diffusion-v1/model.ckpt"
-
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
@@ -175,6 +171,14 @@ if __name__ == '__main__':
         "--skip_save",
         action="store_true",
         help="do not save individual samples. For speed measurements.",
+    )
+    parser.add_argument(
+        "--config_path", type=str, default="optimizedSD/v1-inference.yaml",
+        help="config path"
+    )
+    parser.add_argument(
+        "--ckpt_path", type=str, default="models/ldm/stable-diffusion-v1/model.ckpt",
+        help="checkpoint path"
     )
     parser.add_argument(
         "--ddim_steps",
@@ -227,7 +231,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--n_samples",
         type=int,
-        default=5,
+        default=1,
         help="how many samples to produce for each given prompt. A.k.a. batch size",
     )
     parser.add_argument(
@@ -298,14 +302,14 @@ if __name__ == '__main__':
     outpath = opt.outdir
     grid_count = len(os.listdir(outpath)) - 1
 
-    if opt.seed == None:
+    if opt.seed is None:
         opt.seed = randint(0, 1000000)
     seed_everything(opt.seed)
 
     # Logging
     logger(vars(opt), log_csv="logs/txt2img_logs.csv")
 
-    sd = load_model_from_config(f"{ckpt}")
+    sd = load_model_from_config(f"{opt.ckpt_path}")
     li, lo = [], []
     for key, value in sd.items():
         sp = key.split(".")
@@ -323,7 +327,7 @@ if __name__ == '__main__':
     for key in lo:
         sd["model2." + key[6:]] = sd.pop(key)
 
-    config = OmegaConf.load(f"{config}")
+    config = OmegaConf.load(f"{opt.config_path}")
 
     _model = instantiate_from_config(config.modelUNet)
     _, _ = _model.load_state_dict(sd, strict=False)
