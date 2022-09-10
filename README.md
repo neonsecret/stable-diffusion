@@ -53,6 +53,7 @@ So run: <br>
 
 <h2 align="center">Additional steps for AMD Cards</h2>
 
+### *ROCm for AMD Cards is only supported on Linux!*
 After activating your conda environment, you have to update torch and torchvision wheels which were built with ROCm support:
 
 `pip3 install --upgrade torch torchvision --extra-index-url https://download.pytorch.org/whl/rocm5.1.1`
