@@ -6,10 +6,12 @@ added img2img Batch processing script with gradio interface to run on movie fram
 Start: python optimizedSD/img2imgBatch_gradio.py 
 
 
+
 The script runs on a folder containing subfolders with images to process, it automatic inserts subfolder names into the promt.
 
 
 Works great for me on Windows!
+
 
 
 Example:
@@ -20,7 +22,7 @@ prompt: "an image of a @q@ with a hat"
 
 Folder Stucture:
 
--> folder "imagesToProcess" ( type only this ( relative or absolute path) in input image field )
+-> folder "imagesToProcess" ( type only this ( relative or absolute path) into input image field )
 
 -->  \subfolder "Cat" --> all including images will be processed with prompt: "an image of a Cat with a hat"
 
