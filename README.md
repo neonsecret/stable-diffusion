@@ -1,5 +1,5 @@
 <h1 align="center"> img2img Batch processing gradio script</h1>
-# added img2img Batch processing script with gradio interface to run on movie frames or other many images multiple folders
+added img2img Batch processing script with gradio interface to run on movie frames or other many images multiple folders
 
 Start: python optimizedSD/img2imgBatch_gradio.py 
 
@@ -17,6 +17,11 @@ Folder Stucture:
 -->  ..........
 
 Set fix seed and some batch/numbers depending on your hardware to run on movie frames
+.
+.
+.
+.
+.
 
 
 
