@@ -13,6 +13,7 @@ import gradio as gr
 import numpy as np
 import torch
 from PIL import Image
+from PIL.Image import Resampling
 from einops import rearrange, repeat
 from omegaconf import OmegaConf
 from torch import autocast
@@ -56,7 +57,7 @@ def load_img(image, h0, w0):
     w, h = map(lambda x: x - x % 64, (w, h))  # resize to integer multiple of 32
 
     print(f"New image size ({w}, {h})")
-    image = image.resize((w, h), resample=Image.LANCZOS)
+    image = image.resize((w, h), resample=Resampling.LANCZOS)
     print("resize done, loading image to torch..")
     image = np.array(image).astype(np.float32) / 255.0
     image = image[None].transpose(0, 3, 1, 2)
