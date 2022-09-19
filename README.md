@@ -10,9 +10,9 @@
     </a>
 </p>
 
-## THE GUI IS OUT <br>
+## THE ARTROOM GUI IS OUT <br>
 
-See [GUI Usage tutorial for dummies](GUI_TUTORIAL.md)
+See [GUI our new 1-click windows app](https://artroom.ai/download-app)
 
 ## The hlky's webui version [is out](https://github.com/neonsecret/stable-diffusion-webui)
 

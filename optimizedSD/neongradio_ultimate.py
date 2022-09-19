@@ -1,6 +1,9 @@
 import os
 import sys
+
+import cv2
 import git
+
 if not os.path.exists("CodeFormer/"):
     print("Installing CodeFormer..")
     git.Repo.clone_from("https://github.com/sczhou/CodeFormer/", "CodeFormer")
@@ -105,6 +108,15 @@ def load_mask(mask, h0, w0, newH, newW, invert=False):
     image = image[None].transpose(0, 3, 1, 2)
     image = torch.from_numpy(image)
     return image
+
+
+def toImgOpenCV(imgPIL):  # Conver imgPIL to imgOpenCV
+    i = np.array(imgPIL)  # After mapping from PIL to numpy : [R,G,B,A]
+    # numpy Image Channel system: [B,G,R,A]
+    red = i[:, :, 0].copy()
+    i[:, :, 0] = i[:, :, 2].copy()
+    i[:, :, 2] = red
+    return i
 
 
 async def get_logs():
@@ -288,6 +300,378 @@ def generate_img2img(
             "Samples finished in "
             + str(round(time_taken, 3))
             + " minutes and exported to \n"
+            + sample_path
+            + "\nSeeds used = "
+            + seeds[:-1]
+    )
+    return Image.fromarray(grid.astype(np.uint8)), txt
+
+
+def generate_img2img_interp(
+        image,
+        prompt,
+        strength,
+        ddim_steps,
+        n_iter,
+        batch_size,
+        Width,
+        Height,
+        scale,
+        ddim_eta,
+        unet_bs,
+        device,
+        seed,
+        outdir,
+        img_format,
+        turbo,
+        full_precision,
+        sampler,
+        speed_mp,
+        n_interpolate_samples
+):
+    logging.info(f"prompt: {prompt}, W: {Width}, H: {Height}")
+    try:
+        init_image = load_img(image['image'], Height, Width).to(device)
+    except:
+        init_image = load_img(image, Height, Width).to(device)
+    model.unet_bs = unet_bs
+    model.turbo = turbo
+    model.cdevice = device
+    modelCS.cond_stage_model.device = device
+
+    try:
+        seed = int(seed)
+    except:
+        seed = randint(0, 1000000)
+
+    if device != "cpu" and not full_precision:
+        model.half()
+        modelCS.half()
+        modelFS.half()
+        init_image = init_image.half()
+
+    os.makedirs(outdir, exist_ok=True)
+    outpath = outdir
+    sample_path = os.path.join(outpath, "_".join(re.split(":| ", prompt)))[:150]
+    os.makedirs(sample_path, exist_ok=True)
+    base_count = len(os.listdir(sample_path))
+
+    # n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
+    assert prompt is not None
+    data = [batch_size * [prompt]]
+
+    modelFS.to(device)
+
+    init_image = repeat(init_image, "1 ... -> b ...", b=batch_size)
+    init_latent = modelFS.get_first_stage_encoding(modelFS.encode_first_stage(init_image))  # move to latent space
+    if device != "cpu":
+        mem = torch.cuda.memory_allocated() / 1e6
+        modelFS.to("cpu")
+        while torch.cuda.memory_allocated() / 1e6 >= mem:
+            time.sleep(1)
+
+    assert 0.0 <= strength <= 1.0, "can only work with strength in [0.0, 1.0]"
+    t_enc = int(strength * ddim_steps)
+    print(f"target t_enc is {t_enc} steps")
+
+    if not full_precision and device != "cpu":
+        precision_scope = autocast
+    else:
+        precision_scope = nullcontext
+
+    seeds = ""
+    with torch.no_grad():
+        for _ in trange(n_iter, desc="Sampling"):
+            for prompts in tqdm(data, desc="data"):
+                with precision_scope("cuda"):
+                    modelCS.to(device)
+                    uc = None
+                    if scale != 1.0:
+                        uc = modelCS.get_learned_conditioning(batch_size * [""])
+                    if isinstance(prompts, tuple):
+                        prompts = list(prompts)
+
+                    subprompts, weights = split_weighted_subprompts(prompts[0])
+                    if len(subprompts) > 1:
+                        c = torch.zeros_like(uc)
+                        totalWeight = sum(weights)
+                        # normalize each "sub prompt" and add it
+                        for i in range(len(subprompts)):
+                            weight = weights[i]
+                            # if not skip_normalize:
+                            weight = weight / totalWeight
+                            c = torch.add(c, modelCS.get_learned_conditioning(subprompts[i]), alpha=weight)
+                    else:
+                        c = modelCS.get_learned_conditioning(prompts)
+
+                    if device != "cpu":
+                        mem = torch.cuda.memory_allocated() / 1e6
+                        modelCS.to("cpu")
+                        while torch.cuda.memory_allocated() / 1e6 >= mem:
+                            time.sleep(1)
+
+                    # encode (scaled latent)
+                    true_z_enc = model.stochastic_encode(
+                        init_latent, torch.tensor([t_enc] * batch_size).to(device), seed, ddim_eta, ddim_steps
+                    )
+                    # decode it
+                    samples_ddim = model.sample(
+                        t_enc,
+                        c,
+                        true_z_enc,
+                        unconditional_guidance_scale=scale,
+                        unconditional_conditioning=uc,
+                        sampler=sampler,
+                        speed_mp=speed_mp
+                    )
+                    modelFS.to(device)
+                    print("saving frames")
+                    all_time_samples = []
+                    for ij in range(n_interpolate_samples):
+                        temp_all_samples = []
+                        for i in range(batch_size):
+                            start0_sample = samples_ddim[i].unsqueeze(0)
+                            interp_sample = torch.lerp(init_latent, start0_sample, (ij / n_interpolate_samples))
+                            x_samples_ddim = modelFS.decode_first_stage(interp_sample)
+                            x_sample = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+                            temp_all_samples.append(x_sample.to("cpu"))
+                            x_sample = 255.0 * rearrange(x_sample[0].cpu().numpy(), "c h w -> h w c")
+                            Image.fromarray(x_sample.astype(np.uint8)).save(
+                                os.path.join(sample_path, "seed_" + str(seed) + "_" + f"{base_count:05}.{img_format}")
+                            )
+                            seeds += str(seed) + ","
+                            base_count += 1
+                        grid = torch.cat(temp_all_samples, 0)
+                        grid = make_grid(grid, nrow=n_iter)
+                        grid = 255.0 * rearrange(grid, "c h w -> h w c").cpu().numpy()
+                        all_time_samples.append(Image.fromarray(grid.astype(np.uint8)))
+                    if device != "cpu":
+                        mem = torch.cuda.memory_allocated() / 1e6
+                        modelFS.to("cpu")
+                        while torch.cuda.memory_allocated() / 1e6 >= mem:
+                            time.sleep(1)
+
+                    del samples_ddim
+                    del x_sample
+                    del x_samples_ddim
+                    print("memory_final = ", torch.cuda.memory_allocated() / 1e6)
+        # all_samples.append(all_time_samples)
+
+    out = cv2.VideoWriter("tempfile.mp4", cv2.VideoWriter_fourcc(*'h264'), 12, (Width, Height))
+    for img in all_time_samples:
+        out.write(toImgOpenCV(img))
+    out.release()
+
+    return "tempfile.mp4", "yeah here's your video"
+
+
+def generate_double_triple(
+        prompt,
+        ddim_steps,
+        img2img_strength,
+        Width,
+        Height,
+        scale,
+        ddim_eta,
+        unet_bs,
+        device,
+        seed,
+        outdir,
+        img_format,
+        turbo,
+        full_precision,
+        sampler,
+        speed_mp,
+        upscale_reso
+):
+    C = 4
+    f = 8
+    start_code = None
+    model.unet_bs = unet_bs
+    model.turbo = turbo
+    model.cdevice = device
+    modelCS.cond_stage_model.device = device
+
+    if seed == "":
+        seed = randint(0, 1000000)
+    seed = int(seed)
+    seed_everything(seed)
+
+    if device != "cpu" and not full_precision:
+        model.half()
+        modelFS.half()
+        modelCS.half()
+
+    tic = time.time()
+    os.makedirs(outdir, exist_ok=True)
+    outpath = outdir
+    sample_path = os.path.join(outpath, "_".join(re.split(":| ", prompt.replace("/", ""))))[:150]
+    os.makedirs(sample_path, exist_ok=True)
+    base_count = len(os.listdir(sample_path))
+
+    # n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
+    assert prompt is not None
+    data = [1 * [prompt]]
+
+    if device != "cpu" and not full_precision:
+        precision_scope = autocast
+    else:
+        precision_scope = nullcontext
+
+    seeds = ""
+    with torch.no_grad():
+        all_samples = list()
+        for prompts in tqdm(data, desc="data"):
+            with precision_scope("cuda"):
+                modelCS.to(device)
+                uc = None
+                if scale != 1.0:
+                    uc = modelCS.get_learned_conditioning(1 * [""])
+                if isinstance(prompts, tuple):
+                    prompts = list(prompts)
+
+                subprompts, weights = split_weighted_subprompts(prompts[0])
+                if len(subprompts) > 1:
+                    c = torch.zeros_like(uc)
+                    totalWeight = sum(weights)
+                    # normalize each "sub prompt" and add it
+                    for i in range(len(subprompts)):
+                        weight = weights[i]
+                        # if not skip_normalize:
+                        weight = weight / totalWeight
+                        c = torch.add(c, modelCS.get_learned_conditioning(subprompts[i]), alpha=weight)
+                else:
+                    c = modelCS.get_learned_conditioning(prompts)
+
+                shape = [1, C, Height // f, Width // f]
+
+                if device != "cpu":
+                    mem = torch.cuda.memory_allocated() / 1e6
+                    modelCS.to("cpu")
+                    while torch.cuda.memory_allocated() / 1e6 >= mem:
+                        time.sleep(1)
+
+                samples_ddim = model.sample(
+                    S=ddim_steps,
+                    conditioning=c,
+                    seed=seed,
+                    shape=shape,
+                    verbose=False,
+                    unconditional_guidance_scale=scale,
+                    unconditional_conditioning=uc,
+                    eta=ddim_eta,
+                    x_T=start_code,
+                    sampler=sampler,
+                    speed_mp=speed_mp
+                )
+
+                modelFS.to(device)
+
+                x_samples_ddim = modelFS.decode_first_stage(samples_ddim[0].unsqueeze(0))
+                x_sample = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+                x_sample = 255.0 * rearrange(x_sample[0].cpu().numpy(), "c h w -> h w c")
+                Image.fromarray(x_sample.astype(np.uint8)).save(
+                    os.path.join(sample_path, "seed_" + str(seed) + "_step1_" + f"{base_count:05}.{img_format}")
+                )
+
+                ### STEP 2
+
+                init_image = repeat(
+                    load_img(Image.fromarray(x_sample.astype(np.uint8)), Height * 2, Width * 2).to(device),
+                    "1 ... -> b ...", b=1)
+                init_latent = modelFS.get_first_stage_encoding(modelFS.encode_first_stage(init_image))
+
+                modelFS.cpu()
+                model.to(device)
+
+                z_enc = model.stochastic_encode(
+                    init_latent, torch.tensor([int(img2img_strength * ddim_steps)]).to(device), seed, ddim_eta,
+                    ddim_steps
+                ).to(device)
+
+                samples_ddim = model.sample(
+                    int(img2img_strength * ddim_steps // 2),
+                    c,
+                    z_enc,
+                    unconditional_guidance_scale=scale,
+                    unconditional_conditioning=uc,
+                    sampler="ddim",
+                    speed_mp=speed_mp
+                )
+
+                modelFS.to(device)
+                model.cpu()
+                modelCS.to("cpu")
+                torch.cuda.empty_cache()
+
+                x_samples_ddim = modelFS.decode_first_stage(samples_ddim[0].unsqueeze(0))
+                x_sample = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+                if upscale_reso < 3:
+                    all_samples.append(x_sample.cpu())
+                x_sample = 255.0 * rearrange(x_sample[0].cpu().numpy(), "c h w -> h w c")
+                Image.fromarray(x_sample.astype(np.uint8)).save(
+                    os.path.join(sample_path, "seed_" + str(seed) + "_step2_" + f"{base_count:05}.{img_format}")
+                )
+
+                ### STEP 3
+                if upscale_reso >= 3:
+                    init_image = repeat(
+                        load_img(Image.fromarray(x_sample.astype(np.uint8)), Height * 3, Width * 3).to(device),
+                        "1 ... -> b ...", b=1)
+                    init_latent = modelFS.get_first_stage_encoding(modelFS.encode_first_stage(init_image))
+
+                    modelFS.cpu()
+                    model.to(device)
+
+                    z_enc = model.stochastic_encode(
+                        init_latent, torch.tensor([int(img2img_strength * ddim_steps)]).to(device), seed, ddim_eta,
+                        ddim_steps
+                    ).to(device)
+
+                    samples_ddim = model.sample(
+                        int(img2img_strength * ddim_steps // 2),
+                        c,
+                        z_enc,
+                        unconditional_guidance_scale=scale,
+                        unconditional_conditioning=uc,
+                        sampler="ddim",
+                        speed_mp=speed_mp
+                    )
+
+                    print("saving images")
+                    model.cpu()
+                    modelFS.to(device)
+
+                    x_samples_ddim = modelFS.decode_first_stage(samples_ddim[0].unsqueeze(0))
+                    x_sample = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+                    all_samples.append(x_sample.to("cpu"))
+                    x_sample = 255.0 * rearrange(x_sample[0].cpu().numpy(), "c h w -> h w c")
+                    Image.fromarray(x_sample.astype(np.uint8)).save(
+                        os.path.join(sample_path, "seed_" + str(seed) + "_step3_" + f"{base_count:05}.{img_format}")
+                    )
+
+                if device != "cpu":
+                    mem = torch.cuda.memory_allocated() / 1e6
+                    modelFS.to("cpu")
+                    while torch.cuda.memory_allocated() / 1e6 >= mem:
+                        time.sleep(1)
+
+                del samples_ddim
+                del x_sample
+                del x_samples_ddim
+                print("memory_final = ", torch.cuda.memory_allocated() / 1e6)
+
+    toc = time.time()
+
+    time_taken = (toc - tic) / 60.0
+    grid = torch.cat(all_samples, 0)
+    grid = make_grid(grid, nrow=1)
+    grid = 255.0 * rearrange(grid, "c h w -> h w c").cpu().numpy()
+
+    txt = (
+            "Samples finished in "
+            + str(round(time_taken, 3))
+            + " minutes and exported to "
             + sample_path
             + "\nSeeds used = "
             + seeds[:-1]
@@ -682,7 +1066,7 @@ if __name__ == '__main__':
                                 gr.Slider(1, 100, step=1, label="Batch size"),
                                 gr.Slider(64, 4096, value=512, step=64, label="Width"),
                                 gr.Slider(64, 4096, value=512, step=64, label="Height"),
-                                gr.Slider(0, 50, value=7.5, step=0.1, label="Guidance scale"),
+                                gr.Slider(-25, 25, value=7.5, step=0.1, label="Guidance scale"),
                                 gr.Slider(0, 1, step=0.01, label="DDIM sampling ETA"),
                                 gr.Slider(1, 2, value=1, step=1, label="U-Net batch size"),
                                 gr.Radio(["cuda", "cpu"], value="cuda", label="Device"),
@@ -727,7 +1111,7 @@ if __name__ == '__main__':
                                 gr.Slider(1, 100, step=1, label="Batch size"),
                                 gr.Slider(64, 4096, value=512, step=64, label="Width"),
                                 gr.Slider(64, 4096, value=512, step=64, label="Height"),
-                                gr.Slider(0, 50, value=7.5, step=0.1, label="Guidance scale"),
+                                gr.Slider(-25, 25, value=7.5, step=0.1, label="Guidance scale"),
                                 gr.Slider(0, 1, step=0.01, label="DDIM sampling ETA"),
                                 gr.Slider(1, 2, value=1, step=1, label="U-Net batch size"),
                                 gr.Radio(["cuda", "cpu"], value="cuda", label="Device"),
@@ -744,7 +1128,7 @@ if __name__ == '__main__':
                             ], outputs=[out_image2, gen_res2])
                             b2.click(get_logs, inputs=[], outputs=outs2)
                             b3.click(get_nvidia_smi, inputs=[], outputs=outs3)
-        with gr.Tab("img2img inapint"):
+        with gr.Tab("img2img inpaint"):
             with gr.Column():
                 gr.Markdown("# Generate images from images (with a mask) (neonsecret's adjustments)")
                 gr.Markdown("### Press 'generation status' button to get the model output logs")
@@ -772,7 +1156,7 @@ if __name__ == '__main__':
                                 gr.Slider(1, 100, step=1, label="Batch size"),
                                 gr.Slider(64, 4096, value=512, step=64, label="Width"),
                                 gr.Slider(64, 4096, value=512, step=64, label="Height"),
-                                gr.Slider(0, 50, value=7.5, step=0.1, label="Guidance scale"),
+                                gr.Slider(-25, 25, value=7.5, step=0.1, label="Guidance scale"),
                                 gr.Slider(0, 1, step=0.01, label="DDIM sampling ETA"),
                                 gr.Slider(1, 2, value=1, step=1, label="U-Net batch size"),
                                 gr.Radio(["cuda", "cpu"], value="cuda", label="Device"),
@@ -789,4 +1173,91 @@ if __name__ == '__main__':
                             ], outputs=[out_image3, gen_res3])
                             b2.click(get_logs, inputs=[], outputs=outs2)
                             b3.click(get_nvidia_smi, inputs=[], outputs=outs3)
+        with gr.Tab("img2img interpolate"):
+            with gr.Column():
+                gr.Markdown("# Generate a video interpolation from images")
+                gr.Markdown("### Press 'generation status' button to get the model output logs")
+                with gr.Row():
+                    with gr.Column():
+                        out_video = gr.Video()
+                        gen_res4 = gr.Text(label="Generation results")
+                        outs2 = [gr.Text(label="Logs")]
+                        outs3 = [gr.Text(label="nvidia-smi")]
+                        b1 = gr.Button("Generate!")
+                        b2 = gr.Button("generation status")
+                        b3 = gr.Button("nvidia-smi")
+                    with gr.Column():
+                        with gr.Box():
+                            b1.click(generate_img2img_interp, inputs=[
+                                gr.Image(tool="editor", type="pil", label="Initial image"),
+                                gr.Text(label="Your Prompt"),
+                                gr.Slider(0, 1, value=0.75, label="Generated image strength"),
+                                gr.Slider(1, 200, value=50, label="Sampling Steps"),
+                                gr.Slider(1, 100, step=1, label="Number of images"),
+                                gr.Slider(1, 100, step=1, label="Batch size"),
+                                gr.Slider(64, 4096, value=512, step=64, label="Width"),
+                                gr.Slider(64, 4096, value=512, step=64, label="Height"),
+                                gr.Slider(-25, 25, value=7.5, step=0.1, label="Guidance scale"),
+                                gr.Slider(0, 1, step=0.01, label="DDIM sampling ETA"),
+                                gr.Slider(1, 2, value=1, step=1, label="U-Net batch size"),
+                                gr.Radio(["cuda", "cpu"], value="cuda", label="Device"),
+                                gr.Text(label="Seed"),
+                                gr.Text(value=args.outputs_path, label="Outputs path"),
+                                gr.Radio(["png", "jpg"], value='png', label="Image format"),
+                                gr.Checkbox(value=True, label="Turbo mode (better leave this on)"),
+                                gr.Checkbox(label="Full precision mode (practically does nothing)"),
+                                gr.Radio(
+                                    ["ddim", "plms", "k_dpm_2_a", "k_dpm_2", "k_euler_a", "k_euler", "k_heun", "k_lms"],
+                                    value="ddim", label="Sampler"),
+                                gr.Slider(1, 100, value=100, step=1,
+                                          label="%, VRAM usage limiter (100 means max speed)"),
+                                gr.Slider(1, 120, value=60, step=1, label="How smooth the video will be"),
+                            ], outputs=[out_video, gen_res4])
+                            b2.click(get_logs, inputs=[], outputs=outs2)
+                            b3.click(get_nvidia_smi, inputs=[], outputs=outs3)
+        with gr.Tab("txt2img 2x-3x upscale"):
+            with gr.Column():
+                gr.Markdown("# Generate images from text using SD upscaling")
+                gr.Markdown("### Generate images in 2(3) steps - Wx -> 2Wx2H (-> 3Wx3H)")
+                gr.Markdown("### Press 'generation status' button to get the model output logs")
+                with gr.Row():
+                    with gr.Column():
+                        out_image = gr.Image(label="Output Image")
+                        gen_res = gr.Text(label="Generation results")
+                        outs2 = [gr.Text(label="Logs")]
+                        outs3 = gr.Text(label="nvidia-smi")
+                        b1 = gr.Button("Generate!")
+                        b4 = gr.Button("Face correction")
+                        b5 = gr.Button("Upscale 2x")
+                        b2 = gr.Button("generation status")
+                        b3 = gr.Button("nvidia-smi")
+                    with gr.Column():
+                        with gr.Box():
+                            b4.click(face_restore, inputs=[out_image], outputs=[out_image, gen_res])
+                            b5.click(upscale2x, inputs=[out_image], outputs=[out_image, gen_res])
+                            b1.click(generate_double_triple, inputs=[
+                                gr.Text(label="Your Prompt"),
+                                gr.Slider(1, 200, value=50, label="Sampling Steps"),
+                                gr.Slider(0, 1, value=0.35, label="Upscaled image changes strength"),
+                                gr.Slider(64, 4096, value=512, step=64, label="Width"),
+                                gr.Slider(64, 4096, value=512, step=64, label="Height"),
+                                gr.Slider(-25, 25, value=7.5, step=0.1, label="Guidance scale"),
+                                gr.Slider(0, 1, step=0.01, label="DDIM sampling ETA"),
+                                gr.Slider(1, 2, value=1, step=1, label="U-Net batch size"),
+                                gr.Radio(["cuda", "cpu"], value="cuda", label="Device"),
+                                gr.Text(label="Seed"),
+                                gr.Text(value=args.outputs_path, label="Outputs path"),
+                                gr.Radio(["png", "jpg"], value='png', label="Image format"),
+                                gr.Checkbox(value=True, label="Turbo mode (better leave this on)"),
+                                gr.Checkbox(label="Full precision mode (practically does nothing)"),
+                                gr.Radio(
+                                    ["ddim", "plms", "k_dpm_2_a", "k_dpm_2", "k_euler_a", "k_euler", "k_heun", "k_lms"],
+                                    value="plms", label="Sampler"),
+                                gr.Slider(1, 100, value=100, step=1,
+                                          label="%, VRAM usage limiter (100 means max speed)"),
+                                gr.Slider(2, 3, value=2, step=1,
+                                          label="Neural scaling factor, 3 will take much longer"),
+                            ], outputs=[out_image, gen_res])
+                            b2.click(get_logs, inputs=[], outputs=outs2)
+                            b3.click(get_nvidia_smi, inputs=[], outputs=[outs3])
     demo.launch(share=True)
