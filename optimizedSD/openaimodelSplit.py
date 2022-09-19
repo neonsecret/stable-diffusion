@@ -1,6 +1,6 @@
 import math
 import numpy as np
-import torch as th
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from abc import abstractmethod
@@ -30,7 +30,7 @@ class AttentionPool2d(nn.Module):
             output_dim: int = None,
     ):
         super().__init__()
-        self.positional_embedding = nn.Parameter(th.randn(embed_dim, spacial_dim ** 2 + 1) / embed_dim ** 0.5)
+        self.positional_embedding = nn.Parameter(torch.randn(embed_dim, spacial_dim ** 2 + 1) / embed_dim ** 0.5)
         self.qkv_proj = conv_nd(1, embed_dim, 3 * embed_dim, 1)
         self.c_proj = conv_nd(1, embed_dim, output_dim or embed_dim, 1)
         self.num_heads = embed_dim // num_heads_channels
@@ -39,7 +39,7 @@ class AttentionPool2d(nn.Module):
     def forward(self, x):
         b, c, *_spatial = x.shape
         x = x.reshape(b, c, -1)  # NC(HW)
-        x = th.cat([x.mean(dim=-1, keepdim=True), x], dim=-1)  # NC(HW+1)
+        x = torch.cat([x.mean(dim=-1, keepdim=True), x], dim=-1)  # NC(HW+1)
         x = x + self.positional_embedding[None, :, :].to(x.dtype)  # NC(HW+1)
         x = self.qkv_proj(x)
         x = self.attention(x)
@@ -255,13 +255,11 @@ class ResBlock(TimestepBlock):
             emb_out = emb_out[..., None]
         if self.use_scale_shift_norm:
             out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
-            scale, shift = th.chunk(emb_out, 2, dim=1)
+            scale, shift = torch.chunk(emb_out, 2, dim=1)
             h = out_norm(h) * (1 + scale) + shift
-            del scale, shift
             h = out_rest(h)
         else:
             h = h + emb_out
-            del emb_out
             h = self.out_layers(h)
         return self.skip_connection(x) + h
 
@@ -312,7 +310,6 @@ class AttentionBlock(nn.Module):
         x = x.reshape(b, c, -1)
         qkv = self.qkv(self.norm(x))
         h = self.attention(qkv)
-        del qkv
         h = self.proj_out(h)
         return (x + h).reshape(b, c, *spatial)
 
@@ -334,7 +331,7 @@ def count_flops_attn(model, _x, y):
     # The first computes the weight matrix, the second computes
     # the combination of the value vectors.
     matmul_ops = 2 * b * (num_spatial ** 2) * c
-    model.total_ops += th.DoubleTensor([matmul_ops])
+    model.total_ops += torch.DoubleTensor([matmul_ops])
 
 
 class QKVAttentionLegacy(nn.Module):
@@ -357,12 +354,11 @@ class QKVAttentionLegacy(nn.Module):
         ch = width // (3 * self.n_heads)
         q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch, dim=1)
         scale = 1 / math.sqrt(math.sqrt(ch))
-        weight = th.einsum(
+        weight = torch.einsum(
             "bct,bcs->bts", q * scale, k * scale
         )  # More stable with f16 than dividing afterwards
-        weight = th.softmax(weight.float(), dim=-1).type(weight.dtype)
-        a = th.einsum("bts,bcs->bct", weight, v)
-        del q, k, v, weight
+        weight = torch.softmax(weight.float(), dim=-1).type(weight.dtype)
+        a = torch.einsum("bts,bcs->bct", weight, v)
         return a.reshape(bs, -1, length)
 
     @staticmethod
@@ -390,15 +386,13 @@ class QKVAttention(nn.Module):
         ch = width // (3 * self.n_heads)
         q, k, v = qkv.chunk(3, dim=1)
         scale = 1 / math.sqrt(math.sqrt(ch))
-        weight = th.einsum(
+        weight = torch.einsum(
             "bct,bcs->bts",
             (q * scale).view(bs * self.n_heads, ch, length),
             (k * scale).view(bs * self.n_heads, ch, length),
         )  # More stable with f16 than dividing afterwards
-        del q, k  # hehe optimization
-        weight = th.softmax(weight.float(), dim=-1).type(weight.dtype)
-        a = th.einsum("bts,bcs->bct", weight, v.reshape(bs * self.n_heads, ch, length))
-        del v, weight
+        weight = torch.softmax(weight.float(), dim=-1).type(weight.dtype)
+        a = torch.einsum("bts,bcs->bct", weight, v.reshape(bs * self.n_heads, ch, length))
         return a.reshape(bs, -1, length)
 
     @staticmethod
@@ -468,7 +462,7 @@ class UNetModelEncode(nn.Module):
         self.conv_resample = conv_resample
         self.num_classes = num_classes
         self.use_checkpoint = use_checkpoint
-        self.dtype = th.float16 if use_fp16 else th.float32
+        self.dtype = torch.float16 if use_fp16 else torch.float32
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
@@ -611,7 +605,6 @@ class UNetModelEncode(nn.Module):
         emb = self.time_embed(t_emb)
 
         if self.num_classes is not None:
-            assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
 
         h = x.type(self.dtype)
@@ -655,10 +648,12 @@ class UNetModelDecode(nn.Module):
     ):
         super().__init__()
         if use_spatial_transformer:
-            assert context_dim is not None, 'Fool!! You forgot to include the dimension of your cross-attention conditioning...'
+            assert context_dim is not None, 'Fool!! You forgot to include the dimension of your cross-attention ' \
+                                            'conditioning... '
 
         if context_dim is not None:
-            assert use_spatial_transformer, 'Fool!! You forgot to use the spatial transformer for your cross-attention conditioning...'
+            assert use_spatial_transformer, 'Fool!! You forgot to use the spatial transformer for your ' \
+                                            'cross-attention conditioning... '
             from omegaconf.listconfig import ListConfig
             if type(context_dim) == ListConfig:
                 context_dim = list(context_dim)
@@ -683,7 +678,7 @@ class UNetModelDecode(nn.Module):
         self.conv_resample = conv_resample
         self.num_classes = num_classes
         self.use_checkpoint = use_checkpoint
-        self.dtype = th.float16 if use_fp16 else th.float32
+        self.dtype = torch.float16 if use_fp16 else torch.float32
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
@@ -700,14 +695,8 @@ class UNetModelDecode(nn.Module):
 
                 ch = mult * model_channels
                 if ds in attention_resolutions:
-                    if num_head_channels == -1:
-                        dim_head = ch // num_heads
-                    else:
+                    if num_head_channels != -1:
                         num_heads = ch // num_head_channels
-                        dim_head = num_head_channels
-                    if legacy:
-                        # num_heads = 1
-                        dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
 
                 self._feature_size += ch
                 input_block_chans.append(ch)
@@ -719,14 +708,8 @@ class UNetModelDecode(nn.Module):
                 ds *= 2
                 self._feature_size += ch
 
-        if num_head_channels == -1:
-            dim_head = ch // num_heads
-        else:
+        if num_head_channels != -1:
             num_heads = ch // num_head_channels
-            dim_head = num_head_channels
-        if legacy:
-            # num_heads = 1
-            dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
 
         self._feature_size += ch
 
@@ -809,9 +792,8 @@ class UNetModelDecode(nn.Module):
         """
 
         for module in self.output_blocks:
-            h = th.cat([h, hs.pop()], dim=1)
+            h = torch.cat([h, hs.pop()], dim=1)
             h = module(h, emb, context, speed_mp=speed_mp)
-        del emb
         h = h.type(tp)
         if self.predict_codebook_ids:
             return self.id_predictor(h)

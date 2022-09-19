@@ -64,11 +64,11 @@ class Upsample(nn.Module):
 
     def forward(self, x):
         x = torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
-        dev = x.device
         if self.with_conv:
             try:
                 x = self.conv(x)
             except:
+                dev = x.device
                 x = self.conv.cpu().to(torch.float32)(x.cpu().to(torch.float32)).to(dev).half()
                 self.conv.to(dev).half()
         return x
@@ -183,6 +183,24 @@ class LinAttnBlock(LinearAttention):
         super().__init__(dim=in_channels, heads=1, dim_head=in_channels)
 
 
+@torch.jit.script
+def fused_t(x, c):
+    return x * (int(c) ** (-0.5))
+
+
+@torch.jit.script
+def fused_memory_opt(mem_reserved, mem_active, mem_free_cuda, b, h, w, c):
+    mem_free_torch = mem_reserved - mem_active
+    mem_free_total = mem_free_cuda + mem_free_torch
+
+    # s1 = (b * h * w * 2 * h * w) * 2  # 2 bmms
+    # s2 = (b * ((h * w) ** 2) * 2) * 2  # 2 softmaxes
+    # s3 = (b * c * h * w * 3) * 2  # zeros_like, empty_like, empty_strided
+    # s = 2 * (s1 + s2 + s3)  # 2 because of small allocations which don't really matter
+    s = 16 * b * ((h * w) ** 2) + 12 * b * c * h * w
+    return (s // mem_free_total) + 1 if s > mem_free_total else torch.tensor(1)
+
+
 class AttnBlock(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
@@ -219,7 +237,6 @@ class AttnBlock(nn.Module):
         q = self.q.to(precision).to(dev)(h_)
         k = self.k.to(precision).to(dev)(h_)
         v = self.v.to(precision).to(dev)(h_)
-        del h_
 
         secondary_device = secondary_device if secondary_device is not None else torch.device("cpu")
         sec_precision = torch.float32 if secondary_device == torch.device("cpu") else torch.float16  # float32 for cpu
@@ -236,19 +253,12 @@ class AttnBlock(nn.Module):
         mem_active = stats['active_bytes.all.current']
         mem_reserved = stats['reserved_bytes.all.current']
         mem_free_cuda, _ = torch.cuda.mem_get_info(dev)
-        mem_free_torch = mem_reserved - mem_active
-        mem_free_total = mem_free_cuda + mem_free_torch
 
-        s1 = (b * h * w * 2 * h * w) * 2  # 2 bmms
-        s2 = (b * ((h * w) ** 2) * 2) * 2  # 2 softmaxes
-        s3 = (b * c * h * w * 2) * 3  # zeros_like, empty_like, empty_strided
-        s = 2 * (s1 + s2 + s3)  # 2 because of small allocations which don't really matter
-        chunk_split = int((s // mem_free_total) + 1) if s > mem_free_total else 1
-        mp = q.shape[1] // chunk_split
+        mp = q.shape[1] // fused_memory_opt(mem_reserved, mem_active, mem_free_cuda, b, h, w, c)
 
         for i in range(0, q.shape[1], mp):
             w1 = torch.bmm(q[:, i:i + mp], k)  # b,hw,hw    w[b,i,j]=sum_c q[b,i,c]k[b,c,j]
-            w1 = w1 * (int(c) ** (-0.5))
+            w1 = fused_t(w1, c)
             w1 = torch.nn.functional.softmax(w1, dim=2, dtype=precision)
             # attend to values
             w1 = w1.permute(0, 2, 1)  # b,hw,hw (first hw of k, second of q)

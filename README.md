@@ -34,8 +34,8 @@ Below you can see the speed/resolution comparison table.
 | resolution 	| steps 	| soft_limiter 	| time          	| vram 	| low vram mode 	|
 |------------	|-------	|----------	    |---------------	|------	|---------------	|
 | 512x512    	| 50    	| 100%     	    | 1.5 minutes   	| 4    	| no            	|
-| 512x512    	| 50    	| 100%     	    | 36 seconds    	| 8    	| no            	|
-| 512x512    	| 50    	| 100%     	    | 30 seconds    	| 10   	| no            	|
+| 512x512    	| 50    	| 100%     	    | 31 seconds    	| 8    	| no            	|
+| 512x512    	| 50    	| 100%     	    | 28 seconds    	| 10   	| no            	|
 | 512x512    	| 50    	| 100%     	    | 15 seconds    	| 24   	| no            	|
 | 1024x1024  	| 50    	| 100%     	    | 15 minutes    	| 4    	| no             	|
 | 1024x1024  	| 50    	| 100%     	    | 4 minutes     	| 8    	| no            	|
