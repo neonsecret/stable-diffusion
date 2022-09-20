@@ -258,7 +258,7 @@ class AttnBlock(nn.Module):
 
         for i in range(0, q.shape[1], mp):
             w1 = torch.bmm(q[:, i:i + mp], k)  # b,hw,hw    w[b,i,j]=sum_c q[b,i,c]k[b,c,j]
-            w1 = fused_t(w1, c)
+            w1 = fused_t(w1, torch.tensor(c))
             w1 = torch.nn.functional.softmax(w1, dim=2, dtype=precision)
             # attend to values
             w1 = w1.permute(0, 2, 1)  # b,hw,hw (first hw of k, second of q)
