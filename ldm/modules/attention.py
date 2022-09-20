@@ -151,11 +151,13 @@ class SpatialSelfAttention(nn.Module):
         return x + h_
 
 
-# @torch.jit.script
-def fused_memory_function(mem_reserved, mem_active, mem_free_cuda, speed_mp, dtype_multiplyer, qshape0, qshape1, qshape2, vshape2):
+def fused_memory_function(mem_reserved, mem_active, mem_free_cuda, speed_mp, dtype_multiplyer, qshape0, qshape1,
+                          qshape2, vshape2):
     speed_mp = torch.tensor(1) if speed_mp > 1 or speed_mp < 0 else speed_mp
 
-    mem_free_total = (mem_free_cuda + mem_reserved - mem_active) * speed_mp
+    # print(mem_free_cuda, mem_reserved, mem_active)
+    mem_free_total = (mem_free_cuda - mem_reserved + mem_active) * speed_mp
+    # 4073717760    2078277632    1828193280
 
     # s1, s2, s3, s4 = (qshape0 * qshape1 * qshape1 * 1.5 * dtype_multiplyer), \
     #                  (qshape0 * (qshape1 ** 2) * dtype_multiplyer), \
@@ -164,10 +166,22 @@ def fused_memory_function(mem_reserved, mem_active, mem_free_cuda, speed_mp, dty
     # s = (s1 + s2 + s3 + s4)
     # 4 main operations' needed compute memory: softmax, einsum, another einsum, and r1 allocation memory.
     s = dtype_multiplyer * qshape0 * qshape1 * (2.5 * qshape1 + 3 * qshape2 + 2 * vshape2)
-    s2 = ((s / mem_free_total) + 1) * 1.3 if s > mem_free_total else torch.tensor(1, dtype=torch.int)# * torch.sigmoid(torch.tensor(qshape1 / 8192))
+    s_fake = s / 1.5
+    s = math.floor(((s / mem_free_total) + 1) * 1.1) if s_fake > mem_free_total else 1
     # 7, 684195840.0 151858237.44, 5017436160, 1134559232, 1090054144,
-    # print(f"Splitting to {s2}, {s} {mem_free_total}, {qshape0}, {qshape1}, {qshape2}, {vshape2}")
-    return s2
+    # print(f"Splitting to {s}, {s_fake} {mem_free_total}, {qshape0}, {qshape1}, {qshape2}, {vshape2}")
+    return s
+
+
+@torch.jit.script
+def stackloop(mp, q, k, v):
+    r = torch.zeros((q.shape[0], q.shape[1], v.shape[2]), dtype=q.dtype, device=q.device)
+    mp = int(mp)
+    for i in range(0, q.shape[1], mp):
+        s = torch.einsum('b i d, b j d -> b i j', q[:, i:i + mp], k) * 2
+        s = torch.nn.functional.softmax(s, dim=-1)
+        r[:, i:i + mp] = torch.einsum('b i j, b j d -> b i d', s, v)
+    return r
 
 
 class CrossAttention(nn.Module):
@@ -208,12 +222,13 @@ class CrossAttention(nn.Module):
             mem_free_cuda, _ = torch.cuda.mem_get_info(torch.cuda.current_device())
             dtype_multiplyer = 2 if str(dtype) == "torch.float16" else 4
             speed_mp = speed_mp / 100 if speed_mp is not None else torch.tensor(1)
-            chunk_split = fused_memory_function(mem_reserved, mem_active, mem_free_cuda, speed_mp, dtype_multiplyer, q.shape[0], q.shape[1], q.shape[2], v.shape[2])
+            chunk_split = fused_memory_function(mem_reserved, mem_active, mem_free_cuda, speed_mp, dtype_multiplyer,
+                                                q.shape[0], q.shape[1], q.shape[2], v.shape[2])
         else:
             chunk_split = 1
 
         r1 = torch.zeros(q.shape[0], q.shape[1], v.shape[2], device=device)
-        mp = int(q.shape[1] / chunk_split)
+        mp = q.shape[1] // chunk_split
         # print("The operation will need \t", s, s // 1024 // 1024)
         # print("The available memory is \t", mem_free_total, mem_free_total // 1024 // 1024)
         # print(f"Splitting into {chunk_split} chunks")

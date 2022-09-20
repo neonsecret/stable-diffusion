@@ -686,6 +686,9 @@ def upscale2x(img):
 
 
 def face_restore(img):
+    if img is None:
+        print("Image is not ready!")
+        return None
     only_center_face = False
     draw_box = False
     codeformer_fidelity = 0.5

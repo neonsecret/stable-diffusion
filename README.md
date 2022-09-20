@@ -38,7 +38,7 @@ Below you can see the speed/resolution comparison table.
 | 512x512    	| 50    	| 100%     	    | 28 seconds    	| 10   	| no            	|
 | 512x512    	| 50    	| 100%     	    | 15 seconds    	| 24   	| no            	|
 | 1024x1024  	| 50    	| 100%     	    | 15 minutes    	| 4    	| no             	|
-| 1024x1024  	| 50    	| 100%     	    | 4 minutes     	| 8    	| no            	|
+| 1024x1024  	| 50    	| 100%     	    | 2.79 minutes     	| 8    	| no            	|
 | 1024x1024  	| 50    	| 100%     	    | 3 minutes      	| 10   	| no            	|
 | 1024x1024  	| 50    	| 100%     	    | 70 seconds    	| 24   	| no            	|
 | 2048x2048  	| 50    	| 100%    	    | 25 minutes       	| 8   	| no            	|
