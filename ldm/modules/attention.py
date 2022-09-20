@@ -151,12 +151,8 @@ class SpatialSelfAttention(nn.Module):
         return x + h_
 
 
-def fused_memory_function(mem_reserved, mem_active, mem_free_cuda, speed_mp, dtype_multiplyer, qshape0, qshape1,
+def fused_memory_function(mem_free_total, dtype_multiplyer, qshape0, qshape1,
                           qshape2, vshape2):
-    speed_mp = torch.tensor(1) if speed_mp > 1 or speed_mp < 0 else speed_mp
-
-    # print(mem_free_cuda, mem_reserved, mem_active)
-    mem_free_total = (mem_free_cuda - mem_reserved + mem_active) * speed_mp
     # 4073717760    2078277632    1828193280
 
     # s1, s2, s3, s4 = (qshape0 * qshape1 * qshape1 * 1.5 * dtype_multiplyer), \
@@ -166,8 +162,8 @@ def fused_memory_function(mem_reserved, mem_active, mem_free_cuda, speed_mp, dty
     # s = (s1 + s2 + s3 + s4)
     # 4 main operations' needed compute memory: softmax, einsum, another einsum, and r1 allocation memory.
     s = dtype_multiplyer * qshape0 * qshape1 * (2.5 * qshape1 + 3 * qshape2 + 2 * vshape2)
-    s_fake = s / 1.5
-    s = math.floor(((s / mem_free_total) + 1) * 1.1) if s_fake > mem_free_total else 1
+    s_fake = s / 2.5
+    s = int(s / mem_free_total) if s_fake > mem_free_total else 1
     # 7, 684195840.0 151858237.44, 5017436160, 1134559232, 1090054144,
     # print(f"Splitting to {s}, {s_fake} {mem_free_total}, {qshape0}, {qshape1}, {qshape2}, {vshape2}")
     return s
@@ -216,13 +212,14 @@ class CrossAttention(nn.Module):
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
         if sys.platform != "darwin" and device != "cpu":  # means we can't count gpu memory
             torch.cuda.empty_cache()
-            stats = torch.cuda.memory_stats(device)
-            mem_active = stats['active_bytes.all.current']
-            mem_reserved = stats['reserved_bytes.all.current']
+            stats = torch.cuda.memory_stats(torch.device(0))
+            allocated_bytes = stats['allocated_bytes.all.current']
             mem_free_cuda, _ = torch.cuda.mem_get_info(torch.cuda.current_device())
-            dtype_multiplyer = 2 if str(dtype) == "torch.float16" else 4
             speed_mp = speed_mp / 100 if speed_mp is not None else torch.tensor(1)
-            chunk_split = fused_memory_function(mem_reserved, mem_active, mem_free_cuda, speed_mp, dtype_multiplyer,
+            speed_mp = torch.tensor(1) if speed_mp > 1 or speed_mp < 0 else speed_mp
+            mem_free_total = (mem_free_cuda - allocated_bytes) * 0.97 * speed_mp
+            dtype_multiplyer = 2 if str(dtype) == "torch.float16" else 4
+            chunk_split = fused_memory_function(mem_free_total, dtype_multiplyer,
                                                 q.shape[0], q.shape[1], q.shape[2], v.shape[2])
         else:
             chunk_split = 1
