@@ -151,7 +151,7 @@ class SpatialSelfAttention(nn.Module):
         return x + h_
 
 
-@torch.jit.script
+# @torch.jit.script
 def fused_memory_function(mem_reserved, mem_active, mem_free_cuda, speed_mp, dtype_multiplyer, qshape0, qshape1, qshape2, vshape2):
     speed_mp = torch.tensor(1) if speed_mp > 1 or speed_mp < 0 else speed_mp
 
@@ -164,7 +164,10 @@ def fused_memory_function(mem_reserved, mem_active, mem_free_cuda, speed_mp, dty
     # s = (s1 + s2 + s3 + s4)
     # 4 main operations' needed compute memory: softmax, einsum, another einsum, and r1 allocation memory.
     s = dtype_multiplyer * qshape0 * qshape1 * (2.5 * qshape1 + 3 * qshape2 + 2 * vshape2)
-    return ((s / mem_free_total) + 1) * 1.3 if s > mem_free_total else torch.tensor(1, dtype=torch.int)
+    s2 = ((s / mem_free_total) + 1) * 1.3 if s > mem_free_total else torch.tensor(1, dtype=torch.int)# * torch.sigmoid(torch.tensor(qshape1 / 8192))
+    # 7, 684195840.0 151858237.44, 5017436160, 1134559232, 1090054144,
+    # print(f"Splitting to {s2}, {s} {mem_free_total}, {qshape0}, {qshape1}, {qshape2}, {vshape2}")
+    return s2
 
 
 class CrossAttention(nn.Module):
@@ -192,7 +195,7 @@ class CrossAttention(nn.Module):
         h = self.heads
         device = x.device
         dtype = x.dtype if dtype is None else dtype
-        x = x.to(dtype)
+        x = x.to(dtype, non_blocking=True)
         context = default(context, x)
         q, k, v = self.to_q(x), self.to_k(context), self.to_v(context)
         del context, x

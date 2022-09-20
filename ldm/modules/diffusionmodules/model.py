@@ -198,7 +198,8 @@ def fused_memory_opt(mem_reserved, mem_active, mem_free_cuda, b, h, w, c):
     # s3 = (b * c * h * w * 3) * 2  # zeros_like, empty_like, empty_strided
     # s = 2 * (s1 + s2 + s3)  # 2 because of small allocations which don't really matter
     s = 16 * b * ((h * w) ** 2) + 12 * b * c * h * w
-    return (s // mem_free_total) + 1 if s > mem_free_total else torch.tensor(1)
+    s = (s // mem_free_total) + 1 if s > mem_free_total else torch.tensor(1)
+    return s
 
 
 class AttnBlock(nn.Module):
