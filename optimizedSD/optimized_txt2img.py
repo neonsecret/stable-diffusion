@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime
 import os
 import random
 import re
@@ -182,6 +183,15 @@ def get_image(opt, model, modelCS, modelFS, prompt=None):
                         opt.seed += 1
                         base_count += 1
 
+                    count = 0
+                    for x_sample in all_samples:
+                        x_sample = 255. * rearrange(x_sample[0].numpy(), 'c h w -> h w c')
+                        now = datetime.now()
+                        dt_string = now.strftime(" %d-%m-%Y %H_%M_%S ")
+                        Image.fromarray(x_sample.astype(np.uint8)).save(
+                                                            os.path.join(sample_path, f"{dt_string+str(count)}.png"))
+                        count += 1
+                        
                     if opt.device != "cpu":
                         mem = torch.cuda.memory_allocated() / 1e6
                         modelFS.to("cpu")
@@ -422,7 +432,10 @@ if __name__ == '__main__':
     grid = torch.cat(all_samples, 0)
     grid = make_grid(grid, nrow=opt.n_iter)
     grid = 255.0 * rearrange(grid, "c h w -> h w c").cpu().numpy()
+    
+    now = datetime.now()
+    dt_string = now.strftime(" %d-%m-%Y %H_%M_%S ")
     Image.fromarray(grid.astype(np.uint8)).save(
-        os.path.join(outpath + "/" + str(opt.prompt).replace("/", "")[:100] + f".{opt.format}")
+        os.path.join(outpath + "/" + str(opt.prompt).replace("/", "")[:100] + dt_string + f".{opt.format}")
     )
     print("exported to", outpath + "/" + str(opt.prompt).replace("/", "")[:100] + f".{opt.format}")
