@@ -188,8 +188,7 @@ def fused_t(x, c: int):
     return x * (int(c) ** (-0.5))
 
 
-@torch.jit.script
-def fused_memory_opt(mem_reserved: int, mem_active: int, mem_free_cuda: int, b: int, h: int, w: int, c: int):
+def fused_memory_opt(mem_reserved, mem_active, mem_free_cuda, b, h, w, c):
     mem_free_torch = mem_reserved - mem_active
     mem_free_total = mem_free_cuda + mem_free_torch
 
