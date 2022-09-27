@@ -15,8 +15,7 @@ import pytorch_lightning as pl
 import torch
 from einops import rearrange
 from pytorch_lightning.utilities.distributed import rank_zero_only
-from tqdm import tqdm
-from tqdm.auto import trange, tqdm
+from tqdm import trange, tqdm
 
 from ldm.models.autoencoder import VQModelInterface
 from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor
@@ -354,19 +353,44 @@ class KDiffusionSampler:
     def get_sampler_name(self):
         return self.schedule
 
-    def sample(self, S, conditioning, batch_size, shape, verbose, unconditional_guidance_scale,
-               unconditional_conditioning, eta, x_T):
-        sigmas = self.model_wrap.get_sigmas(S)
-        if x_T is None:
-            x_T = torch.randn(tuple(shape), device=sigmas[0].device)
-        x = x_T * sigmas[0]
-        model_wrap_cfg = CFGDenoiser(self.model_wrap)
+    def callback_state(self, img, **kwargs):
+        pass
 
-        samples_ddim = K.sampling.__dict__[f'sample_{self.schedule}'](model_wrap_cfg, x, sigmas,
-                                                                      extra_args={'cond': conditioning,
+    def sample2(self, x, conditioning, unconditional_conditioning, steps, unconditional_guidance_scale, mask=None):
+        sigmas = self.model_wrap.get_sigmas(steps)
+        model_wrap_cfg = CFGDenoiser(self.model_wrap)
+        noise = torch.randn_like(x) * sigmas[steps - 1]
+
+        xi = x + noise
+
+        sigma_sched = sigmas[steps - 1:]
+        model_wrap_cfg.init_latent = x
+
+        return K.sampling.__dict__[f'sample_{self.schedule}'](model_wrap_cfg, xi, sigma_sched,
+                                                              extra_args={'cond': conditioning,
+                                                                          'uncond': unconditional_conditioning,
+                                                                          'cond_scale': unconditional_guidance_scale},
+                                                              disable=False)
+
+    def sample(self, x_latent, cond, S, unconditional_guidance_scale=1.0, unconditional_conditioning=None,
+               mask=None, init_latent=None):
+        sigmas = self.model_wrap.get_sigmas(S)
+        model_wrap_cfg = CFGDenoiser(self.model_wrap)
+        # x_dec = init_latent if init_latent is not None else x_latent
+        # x_dec = init_latent
+        x0 = torch.randn_like(init_latent)
+        # if mask is not None:
+        #     x0_noisy = x0
+        #     x_dec = x0_noisy * mask + (1. - mask) * x_dec
+        x_dec = init_latent + x0 * sigmas[0]
+        # x_dec = x_dec * sigmas[0]
+        samples_ddim = K.sampling.__dict__[f'sample_{self.schedule}'](model_wrap_cfg, x_dec, sigmas,
+                                                                      extra_args={'cond': cond,
                                                                                   'uncond': unconditional_conditioning,
                                                                                   'cond_scale': unconditional_guidance_scale},
                                                                       disable=False)
+        # if mask is not None:
+        #     return x0 * mask + (1. - mask) * x_dec
 
         return samples_ddim
 
@@ -591,10 +615,12 @@ class UNet(DDPM):
                 sampler = KDiffusionSampler(self, 'lms')
             if mask is not None:
                 logging.info("k_diffusion does not support masks yet")
-            samples = sampler.sample(S=S, conditioning=conditioning, batch_size=batch_size,
-                                     shape=shape, verbose=False,
+            # samples = sampler.sample(x_latent, conditioning,
+            #                          unconditional_conditioning, S, unconditional_guidance_scale)
+            samples = sampler.sample(x_latent, conditioning, S,
                                      unconditional_guidance_scale=unconditional_guidance_scale,
-                                     unconditional_conditioning=unconditional_conditioning, eta=eta, x_T=x_latent)
+                                     unconditional_conditioning=unconditional_conditioning,
+                                     mask=mask, init_latent=x_T)
 
         # elif sampler == "euler":
         #     cvd = CompVisDenoiser(self.alphas_cumprod)
@@ -611,8 +637,10 @@ class UNet(DDPM):
 
     def q_sample(self, x_start, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start)).to(x_start.device)
-        return (extract_into_tensor(self.sqrt_alphas_cumprod.to(x_start.device), t.to(x_start.device), x_start.shape) * x_start +
-                extract_into_tensor(self.sqrt_one_minus_alphas_cumprod.to(x_start.device), t.to(x_start.device), x_start.shape) * noise)
+        return (extract_into_tensor(self.sqrt_alphas_cumprod.to(x_start.device), t.to(x_start.device),
+                                    x_start.shape) * x_start +
+                extract_into_tensor(self.sqrt_one_minus_alphas_cumprod.to(x_start.device), t.to(x_start.device),
+                                    x_start.shape) * noise)
 
     @torch.no_grad()
     def plms_sampling(self, cond, b, img,

@@ -56,9 +56,6 @@ def load_img(path, h0, w0):
     return 2.0 * image - 1.0
 
 
-config = "optimizedSD/v1-inference.yaml"
-ckpt = "models/ldm/stable-diffusion-v1/model.ckpt"
-
 parser = argparse.ArgumentParser()
 
 parser.add_argument(
@@ -66,6 +63,15 @@ parser.add_argument(
 )
 parser.add_argument("--outdir", type=str, nargs="?", help="dir to write results to", default="outputs/img2img-samples")
 parser.add_argument("--init-img", type=str, nargs="?", help="path to the input image")
+
+parser.add_argument(
+    "--config_path", type=str, default="optimizedSD/v1-inference.yaml",
+    help="config path"
+)
+parser.add_argument(
+    "--ckpt_path", type=str, default="models/ldm/stable-diffusion-v1/model.ckpt",
+    help="checkpoint path"
+)
 
 parser.add_argument(
     "--skip_grid",
@@ -178,6 +184,9 @@ parser.add_argument(
     default="ddim",
 )
 opt = parser.parse_args()
+
+config = opt.config_path
+ckpt = opt.ckpt_path
 
 tic = time.time()
 os.makedirs(opt.outdir, exist_ok=True)

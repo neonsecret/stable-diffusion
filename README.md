@@ -1,4 +1,4 @@
-# Update: v1.0.5 even superfaster superbigger-res updated ultimate GUI mode edition, with k_diffusion samplers and CodeFormer and Upscalers (only in gradio)
+# Update: v1.0.6 even superfaster superbigger-res updated ultimate GUI mode edition, with k_diffusion samplers and CodeFormer and Upscalers (only in gradio), with xformers flash attention support
 
 <h1 align="center">Optimized Stable Diffusion</h1>
 <p align="center">
@@ -20,6 +20,8 @@ See [GUI our new 1-click windows app](https://artroom.ai/download-app)
 
 ## The gradio UI now has every feature on one page. See usage below.
 
+## The flash attention support has arrived! To try it out, `pip install xformers` (only on linux)
+
 # The project is completely open-source and free, and is only maintained by me. If you want to support me, I have a [ko-fi](https://ko-fi.com/neonsecret)
 
 ### Warning: this requires gradio >= 3.3, be sure to install it or update it.
@@ -31,22 +33,22 @@ To keep up with the newest updates, make sure to run the `pip install --upgrade 
 
 Below you can see the speed/resolution comparison table.
 <br>
-| resolution 	| steps 	| soft_limiter 	| time          	| vram 	| low vram mode 	|
+| resolution 	| steps 	| speed_mp   	| classic time     	| vram 	| low vram mode 	|
 |------------	|-------	|----------	    |---------------	|------	|---------------	|
-| 512x512    	| 50    	| 100%     	    | 1.5 minutes   	| 4    	| no            	|
-| 512x512    	| 50    	| 100%     	    | 31 seconds    	| 8    	| no            	|
-| 512x512    	| 50    	| 100%     	    | 28 seconds    	| 10   	| no            	|
-| 512x512    	| 50    	| 100%     	    | 15 seconds    	| 24   	| no            	|
-| 1024x1024  	| 50    	| 100%     	    | 15 minutes    	| 4    	| no             	|
-| 1024x1024  	| 50    	| 100%     	    | 2.79 minutes     	| 8    	| no            	|
-| 1024x1024  	| 50    	| 100%     	    | 3 minutes      	| 10   	| no            	|
-| 1024x1024  	| 50    	| 100%     	    | 70 seconds    	| 24   	| no            	|
-| 2048x2048  	| 50    	| 100%    	    | 25 minutes       	| 8   	| no            	|
-| 2048x2048  	| 50    	| 100%    	    | 20 minutes       	| 10   	| no            	|
-| 2048x2048  	| 50    	| 100%     	    | 15 minutes 	    | 24   	| no            	|
-| 512x4096   	| 50    	| 100%     	    | 2 minutes     	| 24   	| no            	|
-| 3840x2176  	| 50     	| 100%     	    | 40 minutes    	| 24   	| no             	|
-| 3200x3200  	| 50     	| 100%     	    | 60 minutes    	| 24   	| no             	|
+| 512x512    	| 50    	| default     	| 1.5 minutes   	| 4    	| no            	|
+| 512x512    	| 50    	| default     	| 31 seconds    	| 8    	| no            	|
+| 512x512    	| 50    	| default     	| 28 seconds    	| 10   	| no            	|
+| 512x512    	| 50    	| default     	| 15 seconds    	| 24   	| no            	|
+| 1024x1024  	| 50    	| default     	| 15 minutes    	| 4    	| no             	|
+| 1024x1024  	| 50    	| default     	| 2.3 minutes     	| 8    	| no            	|
+| 1024x1024  	| 50    	| default     	| 3 minutes      	| 10   	| no            	|
+| 1024x1024  	| 50    	| default     	| 70 seconds    	| 24   	| no            	|
+| 2048x2048  	| 50    	| default    	| 25 minutes       	| 8   	| no            	|
+| 2048x2048  	| 50    	| default    	| 20 minutes       	| 10   	| no            	|
+| 2048x2048  	| 50    	| default     	| 15 minutes 	    | 24   	| no            	|
+| 512x4096   	| 50    	| default     	| 2 minutes     	| 24   	| no            	|
+| 3840x2176  	| 50     	| default     	| 40 minutes    	| 24   	| no             	|
+| 3200x3200  	| 50     	| default     	| 60 minutes    	| 24   	| no             	|
 <br>
 
 gpus used: gtx 1050 ti, rtx 3070, colab gpu, rtx 3090

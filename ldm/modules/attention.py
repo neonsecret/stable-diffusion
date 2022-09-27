@@ -151,38 +151,10 @@ class SpatialSelfAttention(nn.Module):
         return x + h_
 
 
-def fused_memory_function(mem_free_total, dtype_multiplyer, qshape0, qshape1,
-                          qshape2, vshape2):
-    # 4073717760    2078277632    1828193280
-
-    # s1, s2, s3, s4 = (qshape0 * qshape1 * qshape1 * 1.5 * dtype_multiplyer), \
-    #                  (qshape0 * (qshape1 ** 2) * dtype_multiplyer), \
-    #                  (qshape0 * qshape1 * qshape2 * 3 * dtype_multiplyer), \
-    #                  (qshape0 * qshape1 * vshape2 * 2 * dtype_multiplyer)
-    # s = (s1 + s2 + s3 + s4)
-    # 4 main operations' needed compute memory: softmax, einsum, another einsum, and r1 allocation memory.
-    s = dtype_multiplyer * qshape0 * qshape1 * (2.5 * qshape1 + 3 * qshape2 + 2 * vshape2)
-    s_fake = s / 2.5
-    s = int(s / mem_free_total) if s_fake > mem_free_total else 1
-    # 7, 684195840.0 151858237.44, 5017436160, 1134559232, 1090054144,
-    # print(f"Splitting to {s}, {s_fake} {mem_free_total}, {qshape0}, {qshape1}, {qshape2}, {vshape2}")
-    return s
-
-
-@torch.jit.script
-def stackloop(mp, q, k, v):
-    r = torch.zeros((q.shape[0], q.shape[1], v.shape[2]), dtype=q.dtype, device=q.device)
-    mp = int(mp)
-    for i in range(0, q.shape[1], mp):
-        s = torch.einsum('b i d, b j d -> b i j', q[:, i:i + mp], k) * 2
-        s = torch.nn.functional.softmax(s, dim=-1)
-        r[:, i:i + mp] = torch.einsum('b i j, b j d -> b i d', s, v)
-    return r
-
-
 class CrossAttention(nn.Module):
     def __init__(self, query_dim, superfastmode=True, context_dim=None, heads=8, dim_head=64, dropout=0.):
         super().__init__()
+        self.dim_head = 40
         inner_dim = dim_head * heads
         context_dim = default(context_dim, query_dim)
 
@@ -192,49 +164,120 @@ class CrossAttention(nn.Module):
         self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
         self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
         self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
-        self.superfastmode = superfastmode
 
         self.to_out = nn.Sequential(
             nn.Linear(inner_dim, query_dim),
             nn.Dropout(dropout)
         )
         self.fast_forward = superfastmode
-        # self.forward = self.fast_forward if superfastmode else self.slow_forward
 
-    def forward(self, x, speed_mp=None, context=None, mask=None, dtype=None):
+    def _maybe_init(self, x):
+        """
+        Initialize the attention operator, if required We expect the head dimension to be exposed here, meaning that x
+        : B, Head, Length
+        """
+        _, M, K = x.shape
+        try:
+            import xformers
+            import xformers.ops
+            self.attention_op = xformers.ops.AttentionOpDispatch(
+                dtype=x.dtype,
+                device=x.device,
+                k=K,
+                attn_bias_type=type(None),
+                has_dropout=False,
+                kv_len=M,
+                q_len=M,
+            ).op
+        except Exception as err:
+            raise Exception(
+                f"Please install xformers with the flash attention / cutlass components or disable it.\n{err}")
+
+    def light_forward(self, x, context=None, mask=None, dtype=None, fucking_hell=False):
+        try:
+            import xformers
+            import xformers.ops
+        except Exception as e:
+            raise ModuleNotFoundError("Please install xformers!", e)
+        q = self.to_q(x)
+        context = default(context, x)
+        k = self.to_k(context)
+        v = self.to_v(context)
+
+        b, _, _ = q.shape
+        q, k, v = map(
+            lambda t: t.unsqueeze(3)
+                .reshape(b, t.shape[1], self.heads, int(t.shape.numel() / (b * self.heads * t.shape[1])))
+                .permute(0, 2, 1, 3)
+                .reshape(b * self.heads, t.shape[1], int(t.shape.numel() / (b * self.heads * t.shape[1])))
+                .contiguous(),
+            (q, k, v),
+        )
+
+        # init the attention op, if required, using the proper dimensions
+        self._maybe_init(q)
+
+        # actually compute the attention, what we cannot get enough of
+        out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=None, op=self.attention_op)
+        del q, k, v
+
+        out = (
+            out.unsqueeze(0)
+                .reshape(b, self.heads, out.shape[1], int(out.shape.numel() / (b * self.heads * out.shape[1])))
+                .permute(0, 2, 1, 3)
+                .reshape(b, out.shape[1], int(out.shape.numel() / (b * out.shape[1])))
+        )
+        return self.to_out(out)
+
+    def forward(self, x, speed_mp=None, context=None, mask=None, dtype=None, fucking_hell=False):
+        if speed_mp:
+            return self.light_forward(x, context=context, mask=mask, dtype=dtype, fucking_hell=fucking_hell)
         h = self.heads
         device = x.device
+        secondary_device = device if (self.fast_forward and sys.platform != "darwin") else torch.device("cpu")  # macs
         dtype = x.dtype if dtype is None else dtype
         x = x.to(dtype, non_blocking=True)
+        q_proj = self.to_q(x)
         context = default(context, x)
-        q, k, v = self.to_q(x), self.to_k(context), self.to_v(context)
+        k_proj = self.to_k(context)
+        v_proj = self.to_v(context)
+
         del context, x
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q_proj, k_proj, v_proj))
+        del q_proj, k_proj, v_proj
         if sys.platform != "darwin" and device != "cpu":  # means we can't count gpu memory
             torch.cuda.empty_cache()
-            stats = torch.cuda.memory_stats(torch.device(0))
-            allocated_bytes = stats['allocated_bytes.all.current']
+            stats = torch.cuda.memory_stats(device)
+            mem_active = stats['active_bytes.all.current']
+            mem_reserved = stats['reserved_bytes.all.current']
             mem_free_cuda, _ = torch.cuda.mem_get_info(torch.cuda.current_device())
-            speed_mp = speed_mp / 100 if speed_mp is not None else torch.tensor(1)
-            speed_mp = torch.tensor(1) if speed_mp > 1 or speed_mp < 0 else speed_mp
-            mem_free_total = (mem_free_cuda - allocated_bytes) * 0.97 * speed_mp
+            mem_free_torch = mem_reserved - mem_active
+            mem_free_total = (mem_free_cuda + mem_free_torch)
+            mem_free_total = math.ceil(mem_free_total / 10 ** int(math.log10(mem_free_total) - 1)) * (
+                    10 ** int(math.log10(mem_free_total) - 1))
             dtype_multiplyer = 2 if str(dtype) == "torch.float16" else 4
-            chunk_split = fused_memory_function(mem_free_total, dtype_multiplyer,
-                                                q.shape[0], q.shape[1], q.shape[2], v.shape[2])
+            s1, s2, s3, s4 = (q.shape[0] * q.shape[1] * q.shape[1] * 1.5 * dtype_multiplyer), \
+                             (q.shape[0] * (q.shape[1] ** 2) * dtype_multiplyer), \
+                             (q.shape[0] * q.shape[1] * q.shape[2] * 3 * dtype_multiplyer), \
+                             (q.shape[0] * q.shape[1] * v.shape[2] * 2 * dtype_multiplyer)
+            s = int((s1 + s2 + s3 + s4))
+            # 4 main operations' needed compute memory: softmax, einsum, another einsum, and r1 allocation memory.
+            chunk_split = int(((s / mem_free_total) + 1)) * (2 if fucking_hell else 1) if s > mem_free_cuda else 1
         else:
             chunk_split = 1
-
-        r1 = torch.zeros(q.shape[0], q.shape[1], v.shape[2], device=device)
+        r1 = torch.zeros(q.shape[0], q.shape[1], v.shape[2], device=secondary_device)
         mp = q.shape[1] // chunk_split
         # print("The operation will need \t", s, s // 1024 // 1024)
         # print("The available memory is \t", mem_free_total, mem_free_total // 1024 // 1024)
         # print(f"Splitting into {chunk_split} chunks")
         for i in range(0, q.shape[1], mp):
+            q, k = q.to(device, non_blocking=True), k.to(device, non_blocking=True)
             s1 = einsum('b i d, b j d -> b i j', q[:, i:i + mp], k)
+            q, k = q.to(secondary_device, non_blocking=True), k.to(secondary_device, non_blocking=True)
             s1 *= self.scale
             s1 = F.softmax(s1, dim=-1)
-            r1[:, i:i + mp] = einsum('b i j, b j d -> b i d', s1, v)
-        r1 = rearrange(r1, '(b h) n d -> b n (h d)', h=h)
+            r1[:, i:i + mp] = einsum('b i j, b j d -> b i d', s1, v).to(secondary_device, non_blocking=True)
+        r1 = rearrange(r1, '(b h) n d -> b n (h d)', h=h).to(device, non_blocking=True)
         return self.to_out(r1)
 
 
@@ -252,11 +295,11 @@ class BasicTransformerBlock(nn.Module):
         self.norm3 = nn.LayerNorm(dim)
         self.checkpoint = checkpoint
 
-    def forward(self, x, speed_mp=None, context=None):
-        return checkpoint(self._forward, (x, speed_mp, context), self.parameters(), self.checkpoint)
+    def forward(self, x, speed_mp=None, context=None, fucking_hell=False):
+        return checkpoint(self._forward, (x, speed_mp, context, fucking_hell), self.parameters(), self.checkpoint)
 
-    def _forward(self, x, speed_mp=None, context=None):
-        x = self.attn1(self.norm1(x), speed_mp=speed_mp, dtype=x.dtype) + x
+    def _forward(self, x, speed_mp=None, context=None, fucking_hell=False):
+        x = self.attn1(self.norm1(x), speed_mp=speed_mp, dtype=x.dtype, fucking_hell=fucking_hell) + x
         x = self.attn2(self.norm2(x), speed_mp=speed_mp, context=context, dtype=x.dtype) + x
         x = self.ff(self.norm3(x)) + x
         return x
@@ -303,7 +346,7 @@ class SpatialTransformer(nn.Module):
         x = self.proj_in(x)
         x = rearrange(x, 'b c h w -> b (h w) c')
         for block in self.transformer_blocks:
-            x = block(x, speed_mp=speed_mp, context=context)
+            x = block(x, speed_mp=speed_mp, context=context, fucking_hell=True)
         x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
         x = self.proj_out(x)
         return x + x_in
