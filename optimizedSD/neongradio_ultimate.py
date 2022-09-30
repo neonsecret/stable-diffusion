@@ -1,8 +1,12 @@
+import gc
 import os
+import platform
 import sys
 
 import cv2
+import einops
 import git
+from matplotlib import pyplot as plt
 
 if not os.path.exists("CodeFormer/"):
     print("Installing CodeFormer..")
@@ -120,8 +124,7 @@ def toImgOpenCV(imgPIL):  # Conver imgPIL to imgOpenCV
 
 
 async def get_logs():
-    return "\n".join([x for x in open("log.txt", "r", encoding="utf8").readlines()] +
-                     [y for y in open("tqdm.txt", "r", encoding="utf8").readlines()])
+    return "\n".join([y for y in open("tqdm.txt", "r", encoding="utf8").readlines()])
 
 
 async def get_nvidia_smi():
@@ -133,6 +136,7 @@ async def get_nvidia_smi():
 def generate_img2img(
         image,
         prompt,
+        negative_prompt,
         strength,
         ddim_steps,
         n_iter,
@@ -151,6 +155,8 @@ def generate_img2img(
         sampler,
         speed_mp,
 ):
+    torch.cuda.empty_cache()
+    gc.collect()
     logging.info(f"prompt: {prompt}, W: {Width}, H: {Height}")
     try:
         init_image = load_img(image['image'], Height, Width).to(device)
@@ -223,7 +229,8 @@ def generate_img2img(
                     modelCS.to(device)
                     uc = None
                     if scale != 1.0:
-                        uc = modelCS.get_learned_conditioning(batch_size * [""])
+                        uc = modelCS.get_learned_conditioning(
+                            batch_size * [negative_prompt if negative_prompt is not None else ""])
                     if isinstance(prompts, tuple):
                         prompts = list(prompts)
 
@@ -260,7 +267,7 @@ def generate_img2img(
                         sampler=sampler,
                         speed_mp=speed_mp,
                         batch_size=batch_size,
-                        x_T=init_latent if use_mask else None,
+                        x_T=init_latent,
                         mask=mask if use_mask else None
                     )
 
@@ -329,6 +336,8 @@ def generate_img2img_interp(
         speed_mp,
         n_interpolate_samples
 ):
+    torch.cuda.empty_cache()
+    gc.collect()
     logging.info(f"prompt: {prompt}, W: {Width}, H: {Height}")
     try:
         init_image = load_img(image['image'], Height, Width).to(device)
@@ -458,7 +467,8 @@ def generate_img2img_interp(
         # all_samples.append(all_time_samples)
     print("creating a video..")
     all_time_samples = [toImgOpenCV(img) for img in all_time_samples]
-    out = cv2.VideoWriter("tempfile.mp4", cv2.VideoWriter_fourcc(*'h264'), 15, (all_time_samples[0].shape[1], all_time_samples[0].shape[0]))
+    out = cv2.VideoWriter("tempfile.mp4", cv2.VideoWriter_fourcc(*'h264'), 15,
+                          (all_time_samples[0].shape[1], all_time_samples[0].shape[0]))
     for img in all_time_samples:
         out.write(img)
     out.release()
@@ -485,6 +495,8 @@ def generate_double_triple(
         speed_mp,
         upscale_reso
 ):
+    torch.cuda.empty_cache()
+    gc.collect()
     C = 4
     f = 8
     start_code = None
@@ -764,8 +776,39 @@ def face_restore(img):
     return img, f"Fixed a face, new img size: {img.size}"
 
 
+def float_tensor_to_pil(tensor: torch.Tensor):
+    """aka torchvision's ToPILImage or DiffusionPipeline.numpy_to_pil
+    (Reproduced here to save a torchvision dependency in this demo.)
+    """
+    tensor = (((tensor + 1) / 2)
+              .clamp(0, 1)  # change scale from -1..1 to 0..1
+              .mul(0xFF)  # to 0..255
+              .byte())
+    tensor = einops.rearrange(tensor, 'c h w -> h w c')
+    return Image.fromarray(tensor.cpu().numpy())
+
+
+def callback_fn(x):
+    if type(x) == dict:
+        if x["i"] % 10 != 0:
+            return
+        x = x["x"]
+    x = x.detach().cpu()[0]
+    x = float_tensor_to_pil(torch.einsum('...lhw,lr -> ...rhw', x, torch.tensor([
+            #   R        G        B
+            [0.298, 0.207, 0.208],  # L1
+            [0.187, 0.286, 0.173],  # L2
+            [-0.158, 0.189, 0.264],  # L3
+            [-0.184, -0.271, -0.473],  # L4
+        ])))
+    plt.imshow(x)
+    plt.show()
+    return x
+
+
 def generate_txt2img(
         prompt,
+        negative_prompt,
         ddim_steps,
         n_iter,
         batch_size,
@@ -783,6 +826,8 @@ def generate_txt2img(
         sampler,
         speed_mp
 ):
+    torch.cuda.empty_cache()
+    gc.collect()
     logging.info(f"prompt: {prompt}, W: {Width}, H: {Height}")
     C = 4
     f = 8
@@ -828,7 +873,8 @@ def generate_txt2img(
                     modelCS.to(device)
                     uc = None
                     if scale != 1.0:
-                        uc = modelCS.get_learned_conditioning(batch_size * [""])
+                        uc = modelCS.get_learned_conditioning(
+                            batch_size * [negative_prompt if negative_prompt is not None else ""])
                     if isinstance(prompts, tuple):
                         prompts = list(prompts)
 
@@ -863,7 +909,8 @@ def generate_txt2img(
                         eta=ddim_eta,
                         x_T=start_code,
                         sampler=sampler,
-                        speed_mp=speed_mp
+                        speed_mp=speed_mp,
+                        callback_fn=callback_fn
                     )
 
                     modelFS.to(device)
@@ -981,6 +1028,13 @@ if __name__ == '__main__':
         handlers=handlers
     )
 
+    if platform.system() != "Windows" and not os.path.exists("fast-stable-diffusion/"):
+        print("Installing FlashAttention..")
+        git.Repo.clone_from("https://github.com/TheLastBen/fast-stable-diffusion/", "fast-stable-diffusion")
+        print("Fetched flashattention files")
+    sys.path.append('fast-stable-diffusion/')
+    sys.path.append('fast-stable-diffusion/precompiled/')
+
     parser = argparse.ArgumentParser(description='SD by neonsecret using gradio')
     parser.add_argument('--config_path', default="optimizedSD/v1-inference.yaml", type=str, help='config path')
     parser.add_argument('--ckpt_path', default="models/ldm/stable-diffusion-v1/model.ckpt", type=str, help='ckpt path')
@@ -1065,6 +1119,7 @@ if __name__ == '__main__':
                             b5.click(upscale2x, inputs=[out_image], outputs=[out_image, gen_res])
                             b1.click(generate_txt2img, inputs=[
                                 gr.Text(label="Your Prompt"),
+                                gr.Text(label="Your Negative Prompt"),
                                 gr.Slider(1, 200, value=50, label="Sampling Steps"),
                                 gr.Slider(1, 100, step=1, label="Number of images"),
                                 gr.Slider(1, 100, step=1, label="Batch size"),
@@ -1082,8 +1137,8 @@ if __name__ == '__main__':
                                 gr.Radio(
                                     ["ddim", "plms", "k_dpm_2_a", "k_dpm_2", "k_euler_a", "k_euler", "k_heun", "k_lms"],
                                     value="plms", label="Sampler"),
-                                gr.Slider(1, 100, value=100, step=1,
-                                          label="%, VRAM usage limiter (100 means max speed)"),
+                                gr.Checkbox(value=False,
+                                            label="Lightning Attention (only on linux + xformers installed)"),
                             ], outputs=[out_image, gen_res])
                             b2.click(get_logs, inputs=[], outputs=outs2)
                             b3.click(get_nvidia_smi, inputs=[], outputs=[outs3])
@@ -1109,6 +1164,7 @@ if __name__ == '__main__':
                             b1.click(generate_img2img, inputs=[
                                 gr.Image(tool="editor", type="pil", label="Initial image"),
                                 gr.Text(label="Your Prompt"),
+                                gr.Text(label="Your Negative Prompt"),
                                 gr.Slider(0, 1, value=0.75, label="Generated image strength"),
                                 gr.Slider(1, 200, value=50, label="Sampling Steps"),
                                 gr.Slider(1, 100, step=1, label="Number of images"),
@@ -1127,8 +1183,8 @@ if __name__ == '__main__':
                                 gr.Radio(
                                     ["ddim", "plms", "k_dpm_2_a", "k_dpm_2", "k_euler_a", "k_euler", "k_heun", "k_lms"],
                                     value="ddim", label="Sampler"),
-                                gr.Slider(1, 100, value=100, step=1,
-                                          label="%, VRAM usage limiter (100 means max speed)"),
+                                gr.Checkbox(value=False,
+                                            label="Lightning Attention (only on linux + xformers installed)"),
                             ], outputs=[out_image2, gen_res2])
                             b2.click(get_logs, inputs=[], outputs=outs2)
                             b3.click(get_nvidia_smi, inputs=[], outputs=outs3)
@@ -1154,6 +1210,7 @@ if __name__ == '__main__':
                             b1.click(generate_img2img, inputs=[
                                 gr.Image(tool="sketch", type="pil", label="Initial image with a mask"),
                                 gr.Text(label="Your Prompt"),
+                                gr.Text(label="Your Negative Prompt"),
                                 gr.Slider(0, 1, value=0.75, label="Generated image strength"),
                                 gr.Slider(1, 200, value=50, label="Sampling Steps"),
                                 gr.Slider(1, 100, step=1, label="Number of images"),
@@ -1172,8 +1229,8 @@ if __name__ == '__main__':
                                 gr.Radio(
                                     ["ddim", "plms", "k_dpm_2_a", "k_dpm_2", "k_euler_a", "k_euler", "k_heun", "k_lms"],
                                     value="ddim", label="Sampler"),
-                                gr.Slider(1, 100, value=100, step=1,
-                                          label="%, VRAM usage limiter (100 means max speed)"),
+                                gr.Checkbox(value=False,
+                                            label="Lightning Attention (only on linux + xformers installed)"),
                             ], outputs=[out_image3, gen_res3])
                             b2.click(get_logs, inputs=[], outputs=outs2)
                             b3.click(get_nvidia_smi, inputs=[], outputs=outs3)
@@ -1213,8 +1270,8 @@ if __name__ == '__main__':
                                 gr.Radio(
                                     ["ddim", "plms", "k_dpm_2_a", "k_dpm_2", "k_euler_a", "k_euler", "k_heun", "k_lms"],
                                     value="ddim", label="Sampler"),
-                                gr.Slider(1, 100, value=100, step=1,
-                                          label="%, VRAM usage limiter (100 means max speed)"),
+                                gr.Checkbox(value=False,
+                                            label="Lightning Attention (only on linux + xformers installed)"),
                                 gr.Slider(1, 120, value=60, step=1, label="How smooth/slow the video will be"),
                             ], outputs=[out_video, gen_res4])
                             b2.click(get_logs, inputs=[], outputs=outs2)
@@ -1257,8 +1314,8 @@ if __name__ == '__main__':
                                 gr.Radio(
                                     ["ddim", "plms", "k_dpm_2_a", "k_dpm_2", "k_euler_a", "k_euler", "k_heun", "k_lms"],
                                     value="plms", label="Sampler"),
-                                gr.Slider(1, 100, value=100, step=1,
-                                          label="%, VRAM usage limiter (100 means max speed)"),
+                                gr.Checkbox(value=False,
+                                            label="Lightning Attention (only on linux + xformers installed)"),
                                 gr.Slider(2, 3, value=2, step=1,
                                           label="Neural scaling factor, 3 will take much longer"),
                             ], outputs=[out_image, gen_res])

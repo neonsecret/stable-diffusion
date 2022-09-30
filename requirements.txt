@@ -16,6 +16,8 @@ kornia
 yapf
 lpips
 tb-nightly
+gdown
 git+https://github.com/crowsonkb/k-diffusion
 -e git+https://github.com/CompVis/taming-transformers.git@master#egg=taming-transformers
 -e .
+timm

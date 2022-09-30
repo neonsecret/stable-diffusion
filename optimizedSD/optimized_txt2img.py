@@ -55,7 +55,7 @@ def load_img(image, h0, w0):
     return 2.0 * image - 1.0
 
 
-def get_image(opt, model, modelCS, modelFS, prompt=None):
+def get_image(opt, model, modelCS, modelFS, prompt=None, save=True, callback_fn=None):
     tic = time.time()
     start_code = None
     if opt.fixed_code:
@@ -112,20 +112,26 @@ def get_image(opt, model, modelCS, modelFS, prompt=None):
         model.cdevice = m
 
     seeds = ""
+    try:
+        negative_prompt = opt.negative_prompt
+    except:
+        negative_prompt = ""
     with torch.no_grad():
         all_samples = list()
         count_iter = 0
         for _ in trange(opt.n_iter, desc="Sampling"):
             for prompts in tqdm(data, desc="data"):
                 sample_path = os.path.join(opt.outpath, "_".join(re.split(":| ", prompts[0])))[:150]
-                os.makedirs(sample_path, exist_ok=True)
-                base_count = len(os.listdir(sample_path))
-
+                if save:
+                    os.makedirs(sample_path, exist_ok=True)
+                    base_count = len(os.listdir(sample_path))
+                else:
+                    base_count = 0
                 with precision_scope("cuda"):
                     modelCS.to(opt.device)
                     uc = None
                     if opt.scale != 1.0:
-                        uc = modelCS.get_learned_conditioning(batch_size * [""])
+                        uc = modelCS.get_learned_conditioning(batch_size * [negative_prompt])
                     if isinstance(prompts, tuple):
                         prompts = list(prompts)
 
@@ -156,7 +162,8 @@ def get_image(opt, model, modelCS, modelFS, prompt=None):
                             z_enc,
                             unconditional_guidance_scale=opt.scale,
                             unconditional_conditioning=uc,
-                            sampler="ddim"
+                            sampler="ddim",
+                            callback_fn=callback_fn
                         )
                     else:
                         samples_ddim = model.sample(
@@ -170,7 +177,8 @@ def get_image(opt, model, modelCS, modelFS, prompt=None):
                             eta=opt.ddim_eta,
                             x_T=start_code,
                             sampler=opt.sampler,
-                            speed_mp=speed_mp
+                            speed_mp=speed_mp,
+                            callback_fn=callback_fn
                         )
                     modelFS.to(opt.device)
 
