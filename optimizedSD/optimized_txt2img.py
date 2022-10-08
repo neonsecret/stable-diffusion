@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime
 import os
 import random
 import re
@@ -114,6 +115,7 @@ def get_image(opt, model, modelCS, modelFS, prompt=None, save=True, callback_fn=
         negative_prompt = ""
     with torch.no_grad():
         all_samples = list()
+        count_iter = 0
         for _ in trange(opt.n_iter, desc="Sampling"):
             for prompts in tqdm(data, desc="data"):
                 sample_path = os.path.join(opt.outpath, "_".join(re.split(":| ", prompts[0])))[:150]
@@ -144,7 +146,7 @@ def get_image(opt, model, modelCS, modelFS, prompt=None, save=True, callback_fn=
                         c = modelCS.get_learned_conditioning(prompts)
 
                     shape = [opt.num_images, opt.C, opt.height // opt.f, opt.width // opt.f]
-
+                    seed_at_begin = opt.seed
                     if opt.device != "cpu":
                         mem = torch.cuda.memory_allocated() / 1e6
                         modelCS.to("cpu")
@@ -178,6 +180,15 @@ def get_image(opt, model, modelCS, modelFS, prompt=None, save=True, callback_fn=
                         opt.seed += 1
                         base_count += 1
 
+                    count = 0
+                    for x_index in range(count_iter * batch_size, len(all_samples)):
+                        x_sample = 255. * rearrange(all_samples[x_index][0].numpy(), 'c h w -> h w c')
+                        now = datetime.now()
+                        dt_string = now.strftime("%d-%m-%Y %H_%M_%S ")
+                        Image.fromarray(x_sample.astype(np.uint8)).save(
+                                                            os.path.join(sample_path, f"{dt_string}s{seed_at_begin}d{opt.ddim_steps}-{str(count)}.png"))
+                        count += 1
+                        
                     if opt.device != "cpu":
                         mem = torch.cuda.memory_allocated() / 1e6
                         modelFS.to("cpu")
@@ -185,7 +196,7 @@ def get_image(opt, model, modelCS, modelFS, prompt=None, save=True, callback_fn=
                             time.sleep(1)
                     del samples_ddim
                     print("memory_final = ", torch.cuda.memory_allocated() / 1e6)
-
+            count_iter += 1
     toc = time.time()
 
     time_taken = (toc - tic) / 60.0
@@ -418,7 +429,10 @@ if __name__ == '__main__':
     grid = torch.cat(all_samples, 0)
     grid = make_grid(grid, nrow=opt.n_iter)
     grid = 255.0 * rearrange(grid, "c h w -> h w c").cpu().numpy()
+    
+    now = datetime.now()
+    dt_string = now.strftime(" %d-%m-%Y %H_%M_%S ")
     Image.fromarray(grid.astype(np.uint8)).save(
-        os.path.join(outpath + "/" + str(opt.prompt).replace("/", "")[:100] + f".{opt.format}")
+        os.path.join(outpath + "/" + str(opt.prompt).replace("/", "")[:100] + dt_string + f".{opt.format}")
     )
     print("exported to", outpath + "/" + str(opt.prompt).replace("/", "")[:100] + f".{opt.format}")

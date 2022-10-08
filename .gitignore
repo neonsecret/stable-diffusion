@@ -1,0 +1,16 @@
+
+*.png
+*.pyc
+*.csv
+CodeFormer/
+src/clip/
+src/taming-transformers/
+latent_diffusion.egg-info/dependency_links.txt
+latent_diffusion.egg-info/PKG-INFO
+latent_diffusion.egg-info/requires.txt
+latent_diffusion.egg-info/SOURCES.txt
+latent_diffusion.egg-info/top_level.txt
+log.txt
+models/ldm/stable-diffusion-v1/model.ckpt
+.vscode/settings.json
+tqdm.txt
