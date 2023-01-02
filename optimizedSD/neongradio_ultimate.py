@@ -1,12 +1,10 @@
 import gc
 import os
-import platform
 import sys
 
 import cv2
 import einops
 import git
-from matplotlib import pyplot as plt
 
 if not os.path.exists("CodeFormer/"):
     print("Installing CodeFormer..")
@@ -83,7 +81,7 @@ def load_img(image, h0, w0):
     w, h = map(lambda x: x - x % 64, (w, h))  # resize to integer multiple of 32
 
     print(f"New image size ({w}, {h})")
-    image = image.resize((w, h), resample=Image.LANCZOS)
+    image = image.resize((w, h), resample=Image.Resampling.LANCZOS)
     image = np.array(image).astype(np.float32) / 255.0
     image = image[None].transpose(0, 3, 1, 2)
     image = torch.from_numpy(image)
@@ -100,7 +98,7 @@ def load_mask(mask, h0, w0, newH, newW, invert=False):
     w, h = map(lambda x: x - x % 64, (w, h))  # resize to integer multiple of 32
 
     print(f"New mask size ({w}, {h})")
-    image = image.resize((newW, newH), resample=Image.LANCZOS)
+    image = image.resize((newW, newH), resample=Image.Resampling.LANCZOS)
     # image = image.resize((64, 64), resample=Image.LANCZOS)
     image = np.array(image)
 
@@ -270,10 +268,11 @@ def generate_img2img(
                     #     x_T=init_latent,
                     #     mask=mask if use_mask else None
                     # )
-                    samples_ddim = model.sample(
+                    samples_ddim = model.sample(  # img2img
                         x0=(z_enc if sampler == "ddim" else init_latent),
                         batch_size=batch_size,
                         S=t_enc,
+                        S_ddim_steps=ddim_steps,
                         conditioning=c,
                         seed=seed,
                         verbose=False,
@@ -285,6 +284,7 @@ def generate_img2img(
                         mask=mask if use_mask else None,
                         callback_fn=callback_fn
                     )
+                    print("SHAPE:                 ", (z_enc if sampler == "ddim" else init_latent).shape)
 
                     modelFS.to(device)
                     print("saving images")
@@ -810,12 +810,12 @@ def callback_fn(x):
         x = x["x"]
     x = x.detach().cpu()[0]
     x = float_tensor_to_pil(torch.einsum('...lhw,lr -> ...rhw', x, torch.tensor([
-            #   R        G        B
-            [0.298, 0.207, 0.208],  # L1
-            [0.187, 0.286, 0.173],  # L2
-            [-0.158, 0.189, 0.264],  # L3
-            [-0.184, -0.271, -0.473],  # L4
-        ])))
+        #   R        G        B
+        [0.298, 0.207, 0.208],  # L1
+        [0.187, 0.286, 0.173],  # L2
+        [-0.158, 0.189, 0.264],  # L3
+        [-0.184, -0.271, -0.473],  # L4
+    ])))
     # plt.imshow(x)
     # plt.show()
     return x
@@ -913,7 +913,7 @@ def generate_txt2img(
                         modelCS.to("cpu")
                         while torch.cuda.memory_allocated() / 1e6 >= mem:
                             time.sleep(1)
-                    samples_ddim = model.sample(
+                    samples_ddim = model.sample(  # txt2img
                         S=ddim_steps,
                         conditioning=c,
                         seed=seed,
@@ -1050,7 +1050,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     args.codeformer_path = args.codeformer_path + "/" if args.codeformer_path[-1] != "/" else args.codeformer_path
 
-    print("Downloading codeformer weights..")
+    print("Preparing codeformer weights..")
     download_codeformer(args)
 
     print("Loading realesr..")
@@ -1144,8 +1144,8 @@ if __name__ == '__main__':
                                 gr.Radio(
                                     ["ddim", "plms", "k_dpm_2_a", "k_dpm_2", "k_euler_a", "k_euler", "k_heun", "k_lms"],
                                     value="plms", label="Sampler"),
-                                gr.Checkbox(value=False,
-                                            label="Lightning Attention (only on linux + xformers installed)"),
+                                gr.Checkbox(value=True,
+                                            label="Lightning Attention (check if xformers are installed)"),
                             ], outputs=[out_image, gen_res])
                             b2.click(get_logs, inputs=[], outputs=outs2)
                             b3.click(get_nvidia_smi, inputs=[], outputs=[outs3])
@@ -1190,8 +1190,8 @@ if __name__ == '__main__':
                                 gr.Radio(
                                     ["ddim", "plms", "k_dpm_2_a", "k_dpm_2", "k_euler_a", "k_euler", "k_heun", "k_lms"],
                                     value="ddim", label="Sampler"),
-                                gr.Checkbox(value=False,
-                                            label="Lightning Attention (only on linux + xformers installed)"),
+                                gr.Checkbox(value=True,
+                                            label="Lightning Attention (check if xformers are installed)"),
                             ], outputs=[out_image2, gen_res2])
                             b2.click(get_logs, inputs=[], outputs=outs2)
                             b3.click(get_nvidia_smi, inputs=[], outputs=outs3)
@@ -1236,8 +1236,8 @@ if __name__ == '__main__':
                                 gr.Radio(
                                     ["ddim", "plms", "k_dpm_2_a", "k_dpm_2", "k_euler_a", "k_euler", "k_heun", "k_lms"],
                                     value="ddim", label="Sampler"),
-                                gr.Checkbox(value=False,
-                                            label="Lightning Attention (only on linux + xformers installed)"),
+                                gr.Checkbox(value=True,
+                                            label="Lightning Attention (check if xformers are installed)"),
                             ], outputs=[out_image3, gen_res3])
                             b2.click(get_logs, inputs=[], outputs=outs2)
                             b3.click(get_nvidia_smi, inputs=[], outputs=outs3)

@@ -5,10 +5,9 @@ https://github.com/openai/improved-diffusion/blob/e94489283bb876ac1477d5dd7709bb
 https://github.com/CompVis/taming-transformers
 -- merci
 """
-import asyncio
 import logging
 import math
-import time
+import re
 from functools import partial
 
 import k_diffusion as K
@@ -273,6 +272,21 @@ class CondStage(DDPM):
         self.cond_stage_forward = cond_stage_forward
         self.clip_denoised = False
         self.bbox_tokenizer = None
+        self.re_attention = re.compile(r"""
+        \\\(|
+        \\\)|
+        \\\[|
+        \\]|
+        \\\\|
+        \\|
+        \(|
+        \[|
+        :([+-]?[.\d]+)\)|
+        \)|
+        ]|
+        [^\\()\[\]:]+|
+        :
+        """, re.X)
 
         self.restarted_from_ckpt = False
         if ckpt_path is not None:
@@ -300,7 +314,76 @@ class CondStage(DDPM):
             model = instantiate_from_config(config)
             self.cond_stage_model = model
 
+    def parse_prompt_attention(self, text):
+        res = []
+        round_brackets = []
+        square_brackets = []
+
+        round_bracket_multiplier = 1.1
+        square_bracket_multiplier = 1 / 1.1
+
+        def multiply_range(start_position, multiplier):
+            for p in range(start_position, len(res)):
+                res[p][1] *= multiplier
+
+        for m in self.re_attention.finditer(text):
+            text = m.group(0)
+            weight = m.group(1)
+
+            if text.startswith('\\'):
+                res.append([text[1:], 1.0])
+            elif text == '(':
+                round_brackets.append(len(res))
+            elif text == '[':
+                square_brackets.append(len(res))
+            elif weight is not None and len(round_brackets) > 0:
+                multiply_range(round_brackets.pop(), float(weight))
+            elif text == ')' and len(round_brackets) > 0:
+                multiply_range(round_brackets.pop(), round_bracket_multiplier)
+            elif text == ']' and len(square_brackets) > 0:
+                multiply_range(square_brackets.pop(), square_bracket_multiplier)
+            else:
+                res.append([text, 1.0])
+
+        for pos in round_brackets:
+            multiply_range(pos, round_bracket_multiplier)
+
+        for pos in square_brackets:
+            multiply_range(pos, square_bracket_multiplier)
+
+        if len(res) == 0:
+            res = [["", 1.0]]
+
+        # merge runs of identical weights
+        i = 0
+        while i + 1 < len(res):
+            if res[i][1] == res[i + 1][1]:
+                res[i][0] += res[i + 1][0]
+                res.pop(i + 1)
+            else:
+                i += 1
+
+        return res
+
+    def weights_handling(self, c_):
+        def flat(ll):
+            return [item for sublist in ll for item in sublist]
+
+        ret_prompts = []
+        for prompt in c_:
+            if "(" in prompt or ")" in prompt or "[" in prompt or "]" in prompt:
+                c = self.parse_prompt_attention(prompt)
+                c = flat([[[xx, x[1]] for xx in x[0].split(" ")] for x in c])
+                c = list(filter((lambda x: x is not None),
+                                [xx if (xx[0] != "" and xx[0] != " ") else None for xx in c]))
+                c = " ".join([("".join(x[0]).strip() + ":" + str(x[1])).strip() for x in c])
+                ret_prompts.append(c)
+            else:
+                ret_prompts.append(prompt)
+        return ret_prompts
+
     def get_learned_conditioning(self, c):
+        c = self.weights_handling(c) if c != [""] else c
         if self.cond_stage_forward is None:
             if hasattr(self.cond_stage_model, 'encode') and callable(self.cond_stage_model.encode):
                 c = self.cond_stage_model.encode(c)
@@ -358,24 +441,28 @@ class KDiffusionSampler:
     def callback_state(self, img, **kwargs):
         pass
 
-    def sample2(self, x, conditioning, unconditional_conditioning, steps, unconditional_guidance_scale, mask=None):
-        sigmas = self.model_wrap.get_sigmas(steps)
+    def sample(self, S, conditioning, S_ddim_steps, batch_size, shape, verbose, unconditional_guidance_scale,
+               unconditional_conditioning, eta, x_T, callback_fn=None):
+
+        # print(S, S_ddim_steps)  22 30
+        sigmas = self.model_wrap.get_sigmas(S_ddim_steps)
+        noise = torch.randn_like(x_T) * sigmas[S_ddim_steps - S - 1]
+
+        xi = x_T + noise
+
+        sigma_sched = sigmas[S_ddim_steps - S - 1:]
         model_wrap_cfg = CFGDenoiser(self.model_wrap)
-        noise = torch.randn_like(x) * sigmas[steps - 1]
 
-        xi = x + noise
+        print(xi.shape, conditioning.shape, unconditional_conditioning.shape, sigma_sched.shape, unconditional_guidance_scale)
+        samples = K.sampling.__dict__[f'sample_{self.schedule}'](model_wrap_cfg, xi, sigma_sched,
+                                                                 extra_args={'cond': conditioning,
+                                                                             'uncond': unconditional_conditioning,
+                                                                             'cond_scale': unconditional_guidance_scale},
+                                                                 disable=False)
+        return samples
 
-        sigma_sched = sigmas[steps - 1:]
-        model_wrap_cfg.init_latent = x
-
-        return K.sampling.__dict__[f'sample_{self.schedule}'](model_wrap_cfg, xi, sigma_sched,
-                                                              extra_args={'cond': conditioning,
-                                                                          'uncond': unconditional_conditioning,
-                                                                          'cond_scale': unconditional_guidance_scale},
-                                                              disable=False)
-
-    def sample(self, x_latent, cond, S, unconditional_guidance_scale=1.0, unconditional_conditioning=None,
-               mask=None, init_latent=None, callback_fn=None):
+    def sample_old(self, x_latent, cond, S, unconditional_guidance_scale=1.0, unconditional_conditioning=None,
+                   mask=None, init_latent=None, callback_fn=None):
         sigmas = self.model_wrap.get_sigmas(S)
         model_wrap_cfg = CFGDenoiser(self.model_wrap)
         # x_dec = init_latent if init_latent is not None else x_latent
@@ -543,6 +630,7 @@ class UNet(DDPM):
                S,
                conditioning,
                x0=None,
+               S_ddim_steps=None,
                shape=None,
                seed=1234,
                callback=None,
@@ -626,19 +714,11 @@ class UNet(DDPM):
                 sampler = KDiffusionSampler(self, 'lms')
             if mask is not None:
                 logging.info("k_diffusion does not support masks yet")
-            # samples = sampler.sample(x_latent, conditioning,
-            #                          unconditional_conditioning, S, unconditional_guidance_scale)
-            samples = sampler.sample(x_latent, conditioning, S,
-                                     unconditional_guidance_scale=unconditional_guidance_scale,
-                                     unconditional_conditioning=unconditional_conditioning,
-                                     mask=mask, init_latent=x_T, callback_fn=callback_fn)
 
-        # elif sampler == "euler":
-        #     cvd = CompVisDenoiser(self.alphas_cumprod)
-        #     sig = cvd.get_sigmas(S)
-        #     samples = self.heun_sampling(noise, sig, conditioning,
-        #     unconditional_conditioning=unconditional_conditioning,
-        #                                 unconditional_guidance_scale=unconditional_guidance_scale)
+            samples = sampler.sample(S=S, conditioning=conditioning, batch_size=int(x0.shape[0]),
+                                     shape=x0[0].shape, verbose=False, S_ddim_steps=S_ddim_steps,
+                                     unconditional_guidance_scale=unconditional_guidance_scale,
+                                     unconditional_conditioning=unconditional_conditioning, eta=0.0, x_T=x0)
 
         if self.turbo:
             self.model1.to("cpu")

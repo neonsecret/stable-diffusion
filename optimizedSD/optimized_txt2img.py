@@ -93,6 +93,8 @@ def get_image(opt, model, modelCS, modelFS, prompt=None, save=True, callback_fn=
     if use_init_img:
         modelFS.to(opt.device)
         init_image = repeat(init_image, "1 ... -> b ...", b=batch_size)
+        if init_image.shape[1] == 4:
+            init_image = init_image[:, :3, :, :]
         init_latent = modelFS.get_first_stage_encoding(modelFS.encode_first_stage(init_image))
         z_enc = model.stochastic_encode(
             init_latent,
